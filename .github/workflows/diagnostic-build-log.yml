@@ -119,9 +119,14 @@ jobs:
               )
               sys.exit(1)
 
-          head_commit = request(f"/repos/{head_repo}/commits/{head_sha}")
-          acceptable_commits = {head_short}
-          acceptable_commits.update(parent["sha"][:8] for parent in head_commit.get("parents", []))
+          def ensure_commit_is_ancestor(commit):
+              comparison = request(f"/repos/{head_repo}/compare/{commit}...{head_sha}")
+              status = comparison.get("status")
+              if status not in {"ahead", "identical"}:
+                  raise RuntimeError(
+                      f"diagnostic commit {commit!r} is not an ancestor of PR head {head_short} "
+                      f"(compare status: {status})"
+                  )
 
           failures = []
           valid_reports = []
@@ -139,12 +144,17 @@ jobs:
               diagnostic_logd_error = metadata.get("diagnostic_logd_error")
               password = metadata.get("password")
 
-              if commit not in acceptable_commits:
+              if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{8}", commit):
+                  failures.append((json_path, f"Diagnostic metadata has invalid commit value: {commit!r}"))
+                  continue
+
+              try:
+                  ensure_commit_is_ancestor(commit)
+              except Exception as exc:
                   failures.append(
                       (
                           json_path,
-                          f"Diagnostic metadata is stale: commit={commit!r}, expected current PR head "
-                          f"{head_short} or its parent(s) {sorted(acceptable_commits - {head_short})}. "
+                          f"Diagnostic metadata is stale or not on this PR branch: {exc}. "
                           "Run `python3 build.py` after rebasing and after your code changes.",
                       )
                   )
