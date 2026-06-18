@@ -164,6 +164,28 @@ MODULES = [
     ),
 ]
 
+
+def validate_module_selection(
+    module_arg: str,
+    modules: list[Module] = MODULES,
+) -> tuple[list[Module], list[str]]:
+    """Return selected modules and invalid names for a --module argument."""
+    if module_arg == "all":
+        return list(modules), []
+
+    names = [name.strip() for name in module_arg.split(",")]
+    known_names = {module.name for module in modules}
+    invalid_names = sorted(
+        {
+            name if name else "<empty>"
+            for name in names
+            if not name or name not in known_names
+        }
+    )
+    selected = [module for module in modules if module.name in names]
+    return selected, invalid_names
+
+
 ENCRYPTLY_DIR = ROOT / "tools" / "encryptly"
 ENCRYPTLY_BINARIES = {
     "linux-x64": ENCRYPTLY_DIR / "linux-x64" / "encryptly",
@@ -840,16 +862,11 @@ Diagnostic bundle:
         print(f"  {color(msg, Colors.GRAY)}")
     else:
         print(f"  {color('✓ All prerequisites found', Colors.GREEN)}")
-    if args.module == "all":
-        selected = MODULES
-    else:
-        names = [n.strip() for n in args.module.split(",")]
-        selected = [m for m in MODULES if m.name in names]
-        not_found = set(names) - {m.name for m in MODULES}
-        if not_found:
-            print(f"  {color('✗ Unknown modules:', Colors.RED)} {', '.join(not_found)}")
-            print(f"    Available: {', '.join(m.name for m in MODULES)}")
-            return 1
+    selected, invalid_names = validate_module_selection(args.module)
+    if invalid_names:
+        print(f"  {color('✗ Unknown modules:', Colors.RED)} {', '.join(invalid_names)}")
+        print(f"    Available: {', '.join(m.name for m in MODULES)}")
+        return 1
 
     if not selected:
         print(f"  No modules selected.")
