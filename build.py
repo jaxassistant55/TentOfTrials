@@ -170,6 +170,7 @@ def validate_module_selection(
     modules: list[Module] = MODULES,
 ) -> tuple[list[Module], list[str]]:
     """Return selected modules and invalid names for a --module argument."""
+    module_arg = module_arg.strip()
     if module_arg == "all":
         return list(modules), []
 
@@ -525,6 +526,14 @@ def build_diagnostic_report(
     if logd_relpaths and len(logd_relpaths) > 1:
         decrypt_target = str((DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT))
 
+    def artifact_path(path: Optional[str]) -> Optional[str]:
+        if path is None:
+            return None
+        try:
+            return str(Path(path).resolve().relative_to(ROOT))
+        except ValueError:
+            return path
+
     report = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "commit": commit_id,
@@ -546,7 +555,7 @@ def build_diagnostic_report(
                 "name": name,
                 "status": "PASS" if success else "FAIL",
                 "elapsed_seconds": round(elapsed, 3),
-                "artifact": binary,
+                "artifact": artifact_path(binary),
                 "output": output,
             }
             for name, success, elapsed, output, binary in results

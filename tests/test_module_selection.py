@@ -8,7 +8,7 @@ class ModuleSelectionTests(unittest.TestCase):
         return [module.name for module in modules]
 
     def test_all_selects_every_module(self):
-        selected, invalid = build.validate_module_selection("all")
+        selected, invalid = build.validate_module_selection(" all ")
 
         self.assertEqual(self.module_names(selected), self.module_names(build.MODULES))
         self.assertEqual(invalid, [])
