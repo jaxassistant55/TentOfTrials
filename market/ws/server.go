@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,13 +23,32 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
+const defaultHeartbeatInterval = 30 * time.Second
+
+func heartbeatIntervalFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("WS_HEARTBEAT_INTERVAL_SECS"))
+	if raw == "" {
+		return defaultHeartbeatInterval
+	}
+
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultHeartbeatInterval
+	}
+
+	return time.Duration(seconds) * time.Second
+}
+
 type Client struct {
-	hub      *Hub
-	conn     *websocket.Conn
-	send     chan []byte
-	subs     map[types.Symbol]struct{}
-	remote   string
-	mu       sync.Mutex
+	hub               *Hub
+	conn              *websocket.Conn
+	send              chan []byte
+	subs              map[types.Symbol]struct{}
+	remote            string
+	heartbeatInterval time.Duration
+	pongWait          time.Duration
+	lastPong          time.Time
+	mu                sync.Mutex
 }
 
 type Hub struct {
@@ -36,6 +58,11 @@ type Hub struct {
 	broadcast  chan []byte
 	logger     *zap.Logger
 	mu         sync.RWMutex
+}
+
+type ConnectionHealth struct {
+	Remote   string    `json:"remote"`
+	LastPong time.Time `json:"last_pong"`
 }
 
 type Server struct {
@@ -62,10 +89,11 @@ func (h *Hub) Run() {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = struct{}{}
+			total := len(h.clients)
 			h.mu.Unlock()
 			h.logger.Info("client connected",
 				zap.String("remote", client.remote),
-				zap.Int("total", len(h.clients)),
+				zap.Int("total", total),
 			)
 
 		case client := <-h.unregister:
@@ -74,25 +102,56 @@ func (h *Hub) Run() {
 				delete(h.clients, client)
 				close(client.send)
 			}
+			total := len(h.clients)
 			h.mu.Unlock()
 			h.logger.Info("client disconnected",
 				zap.String("remote", client.remote),
-				zap.Int("total", len(h.clients)),
+				zap.Int("total", total),
 			)
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
+			var stale []*Client
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					close(client.send)
-					delete(h.clients, client)
+					stale = append(stale, client)
 				}
 			}
 			h.mu.RUnlock()
+			if len(stale) > 0 {
+				h.mu.Lock()
+				for _, client := range stale {
+					if _, ok := h.clients[client]; ok {
+						delete(h.clients, client)
+						close(client.send)
+					}
+				}
+				h.mu.Unlock()
+			}
 		}
 	}
+}
+
+func (h *Hub) ActiveConnectionCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
+}
+
+func (h *Hub) ConnectionHealth() []ConnectionHealth {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	health := make([]ConnectionHealth, 0, len(h.clients))
+	for client := range h.clients {
+		health = append(health, ConnectionHealth{
+			Remote:   client.remote,
+			LastPong: client.LastPong(),
+		})
+	}
+	return health
 }
 
 func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int) *Server {
@@ -135,12 +194,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	heartbeatInterval := heartbeatIntervalFromEnv()
+	now := time.Now()
 	client := &Client{
-		hub:    s.hub,
-		conn:   conn,
-		send:   make(chan []byte, 256),
-		subs:   make(map[types.Symbol]struct{}),
-		remote: r.RemoteAddr,
+		hub:               s.hub,
+		conn:              conn,
+		send:              make(chan []byte, 256),
+		subs:              make(map[types.Symbol]struct{}),
+		remote:            r.RemoteAddr,
+		heartbeatInterval: heartbeatInterval,
+		pongWait:          2 * heartbeatInterval,
+		lastPong:          now,
 	}
 
 	s.hub.register <- client
@@ -169,6 +233,18 @@ func (s *Server) handleGetDepth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "depth endpoint"})
 }
 
+func (c *Client) markPong(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastPong = at
+}
+
+func (c *Client) LastPong() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastPong
+}
+
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -176,10 +252,11 @@ func (c *Client) readPump() {
 	}()
 
 	c.conn.SetReadLimit(65536)
-	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
+		now := time.Now()
+		c.markPong(now)
+		return c.conn.SetReadDeadline(now.Add(c.pongWait))
 	})
 
 	for {
@@ -200,7 +277,7 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.heartbeatInterval)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
