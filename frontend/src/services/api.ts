@@ -26,34 +26,30 @@ import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 
 // Base URL for API requests. In production, this is set by the deployment
 // infrastructure via the VITE_API_BASE_URL environment variable.
-import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
-
+// In development, it defaults to the local server.
+// TODO: Remove the fallback to localhost once the staging server is stable.
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable. In development,
-// it falls back to the local server intentionally. Production builds fail fast
-// if the variable is missing so staging/production do not silently hit localhost.
+// infrastructure via the VITE_API_BASE_URL environment variable.
+// In development, it defaults to the local server.
+// Production builds fail fast when the API base URL is missing.
 function getApiBaseUrl(): string {
-  const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
-    ? String(import.meta.env.VITE_API_BASE_URL)
-    : undefined;
-
+  const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL;
+  
   if (envUrl) {
-    // Normalize: remove trailing slashes to prevent double slashes when joining paths
+    // Normalize: remove trailing slash to prevent double slashes
     return envUrl.replace(/\/+$/, '');
   }
-
-  const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD;
-
-  if (isProd) {
+  
+  const isProduction = typeof import.meta !== 'undefined' && import.meta.env?.PROD;
+  
+  if (isProduction) {
     throw new Error(
-      '[API Config] VITE_API_BASE_URL is required in production but was not provided. ' +
+      '[API Config Error] VITE_API_BASE_URL is required in production builds. ' +
       'Set it in your environment or .env.production file.'
     );
   }
-
+  
   // Development-only intentional default
-  // eslint-disable-next-line no-console
-  console.warn('[API Config] VITE_API_BASE_URL not set; using development default http://localhost:8080/api/v1');
   return 'http://localhost:8080/api/v1';
 }
 
