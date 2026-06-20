@@ -147,6 +147,20 @@ that no tables are missing. The row count check was added after an incident
 where a backup was taken while a migration was running, resulting in an
 incomplete backup that restored without error but was missing 3 tables.
 
+### Diagnostic Retention Report
+
+Diagnostic build artifacts are stored under `diagnostic/` as
+`build-<commit>.json`, `build-<commit>.logd`, or split
+`build-<commit>-partNNN.logd` chunks.
+
+Run `python3 build.py --diagnostic-retention-report` to print a read-only JSON
+summary of the diagnostic artifacts currently present in the tree. The report
+includes the current commit prefix, current commit artifact names, older
+artifact names, total artifact count, total bytes, and per-artifact metadata.
+
+The command is safe to run in CI because it only reads `diagnostic/` and never
+deletes, rewrites, stages, or commits files.
+
 ### Recovery Procedure
 
 1. Identify the recovery point (time or transaction ID)
