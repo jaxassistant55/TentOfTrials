@@ -99,6 +99,14 @@ MODULES = [
         env={"NODE_ENV": "production"},
     ),
     Module(
+        name="frontend-websocket-lifecycle-tests",
+        language="TypeScript",
+        dir=ROOT / "frontend",
+        build_cmd=["node", "--experimental-strip-types", "--test", "scripts/test-websocket-lifecycle.mjs"],
+        clean_cmd=["echo", "WebSocket lifecycle tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="market",
         language="Go",
         dir=ROOT / "market",
@@ -368,6 +376,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
