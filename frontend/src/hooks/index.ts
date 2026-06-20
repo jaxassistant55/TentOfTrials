@@ -1,5 +1,7 @@
 import { useQuery, useMutation } from '@tanstack/react-query';
 import type { DashboardStats, User, Session } from '../types';
+export { useSocketMetrics } from './useSocketMetrics';
+export type { SocketMetrics, SocketMetricsCallbacks } from './useSocketMetrics';
 
 const API_BASE = '/api/v1';
 
