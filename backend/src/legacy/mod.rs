@@ -31,13 +31,52 @@ pub mod v1_compat;
 // pub mod v2_compat; // TODO: Implement this when we migrate to API v2
 // pub mod v3_compat; // TODO: Remove this comment - it's never happening
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+};
 
-// Legacy module initialization flag.
-// Set to true when the legacy module has been initialized.
-// This is used by the startup sequence to avoid double-initialization.
-// TODO: Replace this with a proper initialization check using OnceLock.
-static INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Legacy module initialization state. OnceLock guarantees the state holder
+// itself is created only once, while the inner flag preserves shutdown -> init.
+static INITIALIZATION: OnceLock<LegacyInitialization> = OnceLock::new();
+
+struct LegacyInitialization {
+    active: AtomicBool,
+}
+
+impl LegacyInitialization {
+    const fn new() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+        }
+    }
+
+    fn activate(&self) -> InitStatus {
+        if self.active.swap(true, Ordering::SeqCst) {
+            InitStatus::AlreadyInitialized
+        } else {
+            InitStatus::Initialized
+        }
+    }
+
+    fn deactivate(&self) {
+        self.active.store(false, Ordering::SeqCst);
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitStatus {
+    Initialized,
+    AlreadyInitialized,
+}
+
+fn initialization() -> &'static LegacyInitialization {
+    INITIALIZATION.get_or_init(LegacyInitialization::new)
+}
 
 // Legacy module initialization function.
 // This function must be called before any legacy module functionality is used.
@@ -46,13 +85,10 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 // themselves lazily. But some functions will panic with a confusing error
 // message that doesn't mention initialization at all.
 // Good luck debugging that.
-pub fn init() {
-    if INITIALIZED.swap(true, Ordering::SeqCst) {
-        // Already initialized. This is a no-op.
-        // In debug builds, we log a warning about double initialization.
-        // In release builds, we silently ignore it.
-        debug_assert!(false, "Legacy module already initialized");
-        return;
+pub fn init() -> InitStatus {
+    let status = initialization().activate();
+    if status == InitStatus::AlreadyInitialized {
+        return status;
     }
 
     // Initialize sub-modules
@@ -73,6 +109,7 @@ pub fn init() {
     // in INFRA-7391. The ticket was opened in 2021 and has been
     // escalated twice. Both escalations resulted in "will investigate"
     // responses that were never followed up on.
+    status
 }
 
 // Legacy module shutdown function.
@@ -81,7 +118,10 @@ pub fn init() {
 // keep this function for the cases that do need cleanup (like the
 // legacy thread pool which was never implemented).
 pub fn shutdown() {
-    if !INITIALIZED.load(Ordering::SeqCst) {
+    let Some(initialization) = INITIALIZATION.get() else {
+        return;
+    };
+    if !initialization.is_active() {
         return;
     }
 
@@ -95,7 +135,7 @@ pub fn shutdown() {
     // This is a no-op because the connection pool is managed elsewhere.
 
     // Mark as uninitialized
-    INITIALIZED.store(false, Ordering::SeqCst);
+    initialization.deactivate();
 }
 
 // Legacy module status check.
@@ -104,7 +144,10 @@ pub fn shutdown() {
 // The status is almost always "degraded" because the legacy module is,
 // by definition, in a degraded state. This is not a bug.
 pub fn status() -> &'static str {
-    if !INITIALIZED.load(Ordering::SeqCst) {
+    if !INITIALIZATION
+        .get()
+        .is_some_and(LegacyInitialization::is_active)
+    {
         return "unknown";
     }
     // Check sub-module health
@@ -150,3 +193,70 @@ pub const LEGACY_DEPRECATION_WARNING: &str =
      Please migrate to the new module. See the migration guide at \
      https://docs.internal.example.com/migrations/legacy-module for more information. \
      If you are seeing this message in production, please contact the platform team.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::thread;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset() {
+        shutdown();
+    }
+
+    #[test]
+    fn init_reports_repeated_initialization() {
+        let _guard = TEST_LOCK.lock().expect("legacy test lock poisoned");
+        reset();
+
+        assert_eq!(init(), InitStatus::Initialized);
+        assert_eq!(init(), InitStatus::AlreadyInitialized);
+        assert_eq!(status(), "degraded");
+
+        shutdown();
+        assert_eq!(status(), "unknown");
+    }
+
+    #[test]
+    fn shutdown_allows_compatible_reinitialization() {
+        let _guard = TEST_LOCK.lock().expect("legacy test lock poisoned");
+        reset();
+
+        assert_eq!(init(), InitStatus::Initialized);
+        shutdown();
+        assert_eq!(init(), InitStatus::Initialized);
+
+        shutdown();
+    }
+
+    #[test]
+    fn concurrent_init_only_initializes_once() {
+        let _guard = TEST_LOCK.lock().expect("legacy test lock poisoned");
+        reset();
+
+        let handles: Vec<_> = (0..16).map(|_| thread::spawn(init)).collect();
+        let statuses: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("init thread panicked"))
+            .collect();
+
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == InitStatus::Initialized)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == InitStatus::AlreadyInitialized)
+                .count(),
+            15
+        );
+
+        shutdown();
+    }
+}

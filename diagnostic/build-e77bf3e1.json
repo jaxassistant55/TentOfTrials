@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-06-20T07:53:59.728237+00:00",
+  "commit": "e77bf3e1",
+  "diagnostic_logd": "diagnostic\\build-e77bf3e1.logd",
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "816f511026138eb36893",
+  "decrypt_command": "encryptly unpack diagnostic\\build-e77bf3e1.logd <outdir> --password 816f511026138eb36893",
+  "total_modules": 1,
+  "passed": 0,
+  "failed": 1,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 1.382,
+      "artifact": null,
+      "output": "\u001b[1m\u001b[92m   Compiling\u001b[0m proc-macro2 v1.0.106\n\u001b[1m\u001b[92m   Compiling\u001b[0m quote v1.0.45\n\u001b[1m\u001b[92m   Compiling\u001b[0m parking_lot_core v0.9.12\n\u001b[1m\u001b[92m   Compiling\u001b[0m serde_core v1.0.228\n\u001b[1m\u001b[92m   Compiling\u001b[0m serde v1.0.228\n\u001b[1m\u001b[92m   Compiling\u001b[0m icu_normalizer_data v2.2.0\n\u001b[1m\u001b[92m   Compiling\u001b[0m icu_properties_data v2.2.0\n\u001b[1m\u001b[92m   Compiling\u001b[0m tracing-core v0.1.36\n\u001b[1m\u001b[92m   Compiling\u001b[0m http v1.4.2\n\u001b[1m\u001b[92m   Compiling\u001b[0m indexmap v2.14.0\n\u001b[1m\u001b[92m   Compiling\u001b[0m version_check v0.9.5\n\u001b[1m\u001b[92m   Compiling\u001b[0m percent-encoding v2.3.2\n\u001b[1m\u001b[92m   Compiling\u001b[0m httparse v1.10.1\n\u001b[1m\u001b[92m   Compiling\u001b[0m libc v0.2.186\n\u001b[1m\u001b[92m   Compiling\u001b[0m tower-service v0.3.3\n\u001b[1m\u001b[92m   Compiling\u001b[0m zmij v1.0.21\n\u001b[1m\u001b[92m   Compiling\u001b[0m typenum v1.20.1\n\u001b[1m\u001b[92m   Compiling\u001b[0m try-lock v0.2.5\n\u001b[1m\u001b[92m   Compiling\u001b[0m socket2 v0.6.4\n\u001b[1m\u001b[92m   Compiling\u001b[0m mio v1.2.1\n\u001b[1m\u001b[92m   Compiling\u001b[0m native-tls v0.2.18\n\u001b[1m\u001b[92m   Compiling\u001b[0m fnv v1.0.7\n\u001b[1m\u001b[92m   Compiling\u001b[0m atomic-waker v1.1.2\n\u001b[1m\u001b[92m   Compiling\u001b[0m schannel v0.1.29\n\u001b[1m\u001b[91merror\u001b[0m\u001b[1m\u001b[97m: linker `link.exe` not found\u001b[0m\n  \u001b[1m\u001b[96m|\u001b[0m\n  \u001b[1m\u001b[96m= \u001b[0m\u001b[1m\u001b[97mnote\u001b[0m: program not found\n\n\u001b[1m\u001b[92mnote\u001b[0m\u001b[1m\u001b[97m: the msvc targets depend on the msvc linker but `link.exe` was not found\u001b[0m\n\n\u001b[1m\u001b[92mnote\u001b[0m\u001b[1m\u001b[97m: please ensure that Visual Studio 2017 or later, or Build Tools for Visual Studio were installed with the Visual C++ option\u001b[0m\n\n\u001b[1m\u001b[92mnote\u001b[0m\u001b[1m\u001b[97m: VS Code is a different product, and is not sufficient\u001b[0m\n\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `icu_normalizer_data` (build script) due to 1 previous error\n\u001b[1m\u001b[93mwarning\u001b[0m: build failed, waiting for other jobs to finish...\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `icu_properties_data` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `parking_lot_core` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `serde_core` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `native-tls` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `proc-macro2` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `zmij` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `serde` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `quote` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `httparse` (build script) due to 1 previous error\n\u001b[1m\u001b[91merror\u001b[0m: could not compile `libc` (build script) due to 1 previous error"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic\\build-e77bf3e1.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
