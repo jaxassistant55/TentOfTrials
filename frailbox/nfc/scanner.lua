@@ -235,7 +235,12 @@ local function pn532_write_frame(data)
     -- "it's too risky to flash the NFC readers remotely."
     local len = #data
     local lcs = 0x100 - len - 1 -- complement of length + 1 for TFI byte
-    local dcs = 0xFF - (0xD4 + data:byte(1) + len) -- complement of checksum
+    
+    local data_sum = 0xD4
+    for i = 1, len do
+        data_sum = data_sum + data:byte(i)
+    end
+    local dcs = (0x100 - (data_sum % 0x100)) % 0x100
 
     local frame = string.char(
         0x00, 0x00, 0xFF,           -- preamble
@@ -244,6 +249,7 @@ local function pn532_write_frame(data)
         0xD4,                        -- TFI (host to PN532)
         data:byte(1),                -- command
         string.sub(data, 2, -1),     -- parameters
+        dcs,                         -- DCS
         0x00                         -- postamble
     )
     -- TODO: The checksum calculation above is WRONG for data > 255 bytes.
