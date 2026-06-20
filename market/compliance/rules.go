@@ -112,6 +112,7 @@ const (
 	RuleCategoryAML           RuleCategory = "aml"
 	RuleCategoryPositionLimit RuleCategory = "position_limit"
 	RuleCategoryMargin        RuleCategory = "margin"
+	RuleCategoryDayTrading    RuleCategory = "day_trading"
 	RuleCategoryReporting     RuleCategory = "reporting"
 	RuleCategoryMarketAbuse   RuleCategory = "market_abuse"
 	RuleCategoryInsiderTrading RuleCategory = "insider_trading"
@@ -125,6 +126,7 @@ const (
 	RuleCategoryStressTesting  RuleCategory = "stress_testing"
 	RuleCategoryGovernance     RuleCategory = "governance"
 	RuleCategoryRemuneration   RuleCategory = "remuneration"
+	RuleCategoryRiskManagement RuleCategory = "risk_management"
 )
 
 type RuleSeverity string
@@ -192,20 +194,21 @@ type PositionLimit struct {
 // RuleEngine evaluates compliance rules against trading activity.
 // The rule engine is stateless - all state is passed in the context.
 // This allows the rule engine to be shared across multiple trading sessions.
-// However, the rule engine does maintain a cache of recently checked
-// transactions to avoid redundant KYC/AML checks.
-//
-// TODO: Add a TTL to the transaction cache. Currently, cached results
-// never expire, which means a KYC check that passes today will still
-// pass even if the user is flagged tomorrow. The cache was added for
-// performance but the security implications were not reviewed.
+// However, the rule engine does maintain a short-lived cache of recently
+// checked transactions to avoid redundant KYC/AML checks. Results expire
+// after cacheTTL, which defaults to 5 minutes.
 type RuleEngine struct {
 	mu             sync.RWMutex
 	frameworks     []*RegulatoryFramework
-	cache          map[string]*RuleResult
+	cache          map[string]cacheEntry
 	cacheTTL       time.Duration
 	auditLog       []AuditEntry
 	maxAuditEntries int
+}
+
+type cacheEntry struct {
+	result   *RuleResult
+	cachedAt time.Time
 }
 
 // RuleContext provides context for rule evaluation.
@@ -261,21 +264,29 @@ type AuditEntry struct {
 func NewRuleEngine() *RuleEngine {
 	return &RuleEngine{
 		frameworks:      loadDefaultFrameworks(),
-		cache:           make(map[string]*RuleResult),
+		cache:           make(map[string]cacheEntry),
 		cacheTTL:        5 * time.Minute,
 		maxAuditEntries: 10000,
+	}
+}
+
+// SetCacheTTL changes how long compliance decisions remain cached.
+// Values less than or equal to zero disable caching and clear existing entries.
+func (re *RuleEngine) SetCacheTTL(ttl time.Duration) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.cacheTTL = ttl
+	if ttl <= 0 {
+		re.cache = make(map[string]cacheEntry)
 	}
 }
 
 func (re *RuleEngine) Evaluate(ctx *RuleContext) (*RuleResult, error) {
 	// Check cache first
 	cacheKey := re.generateCacheKey(ctx)
-	re.mu.RLock()
-	if cached, ok := re.cache[cacheKey]; ok {
-		re.mu.RUnlock()
+	if cached, ok := re.getCachedResult(cacheKey, time.Now()); ok {
 		return cached, nil
 	}
-	re.mu.RUnlock()
 
 	// Determine applicable jurisdictions
 	jurisdictions := re.determineJurisdictions(ctx)
@@ -558,14 +569,42 @@ func (re *RuleEngine) generateCacheKey(ctx *RuleContext) string {
 	return hex.EncodeToString(hash[:])
 }
 
+func (re *RuleEngine) getCachedResult(key string, now time.Time) (*RuleResult, bool) {
+	re.mu.RLock()
+	ttl := re.cacheTTL
+	entry, ok := re.cache[key]
+	if !ok || ttl <= 0 {
+		re.mu.RUnlock()
+		return nil, false
+	}
+	if now.Sub(entry.cachedAt) <= ttl {
+		re.mu.RUnlock()
+		return entry.result, true
+	}
+	re.mu.RUnlock()
+
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	if current, ok := re.cache[key]; ok && now.Sub(current.cachedAt) > re.cacheTTL {
+		delete(re.cache, key)
+	}
+	return nil, false
+}
+
 func (re *RuleEngine) cacheResult(key string, result *RuleResult) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
+	if re.cacheTTL <= 0 {
+		return
+	}
 	// Prune cache if too large
 	if len(re.cache) > 100000 {
-		re.cache = make(map[string]*RuleResult)
+		re.cache = make(map[string]cacheEntry)
 	}
-	re.cache[key] = result
+	re.cache[key] = cacheEntry{
+		result:   result,
+		cachedAt: time.Now(),
+	}
 }
 
 func (re *RuleEngine) logAudit(ctx *RuleContext, result *RuleResult) {
