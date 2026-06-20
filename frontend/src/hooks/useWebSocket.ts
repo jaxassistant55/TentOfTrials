@@ -35,6 +35,13 @@ import {
   markWSUnmounted,
   setWSReconnectTimer,
 } from './webSocketLifecycle';
+import {
+  createInitialWSConnectionMetrics,
+  recordWSConnected,
+  recordWSDisconnect,
+  recordWSReconnectAttempt,
+  type WSConnectionMetrics,
+} from './webSocketMetrics';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -85,6 +92,7 @@ export interface WSState {
   totalMessagesReceived: number;
   errors: number;
   latencyMs: number | null;
+  connectionMetrics: WSConnectionMetrics;
 }
 
 interface QueuedMessage {
@@ -130,6 +138,7 @@ export function useWebSocket(options: WSOptions) {
     totalMessagesReceived: 0,
     errors: 0,
     latencyMs: null,
+    connectionMetrics: createInitialWSConnectionMetrics(),
   });
 
   const updateState = useCallback((partial: Partial<WSState> | ((prev: WSState) => WSState)) => {
@@ -206,7 +215,12 @@ export function useWebSocket(options: WSOptions) {
       ws.onopen = (event) => {
         if (!isCurrentCallback()) return;
         reconnectAttemptRef.current = 0;
-        updateState({ connectionState: 'connected', reconnectAttempt: 0 });
+        updateState(prev => ({
+          ...prev,
+          connectionState: 'connected',
+          reconnectAttempt: 0,
+          connectionMetrics: recordWSConnected(prev.connectionMetrics),
+        }));
 
         // Resubscribe to all channels
         subscriptionsRef.current.forEach((sub, channel) => {
@@ -276,7 +290,11 @@ export function useWebSocket(options: WSOptions) {
         if (!isCurrentCallback()) return;
         wsRef.current = null;
         stopPing();
-        updateState({ connectionState: 'disconnected' });
+        updateState(prev => ({
+          ...prev,
+          connectionState: 'disconnected',
+          connectionMetrics: recordWSDisconnect(prev.connectionMetrics, event),
+        }));
         mergedOptions.onClose?.(event);
         scheduleReconnect();
       };
@@ -302,6 +320,10 @@ export function useWebSocket(options: WSOptions) {
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
+      updateState(prev => ({
+        ...prev,
+        connectionMetrics: recordWSDisconnect(prev.connectionMetrics, 'Client disconnect'),
+      }));
       wsRef.current.close(1000, 'Client disconnect');
       wsRef.current = null;
     }
@@ -326,7 +348,12 @@ export function useWebSocket(options: WSOptions) {
       console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttemptRef.current})`);
     }
 
-    updateState({ connectionState: 'reconnecting', reconnectAttempt: reconnectAttemptRef.current });
+    updateState(prev => ({
+      ...prev,
+      connectionState: 'reconnecting',
+      reconnectAttempt: reconnectAttemptRef.current,
+      connectionMetrics: recordWSReconnectAttempt(prev.connectionMetrics),
+    }));
 
     const timer = setTimeout(() => {
       markWSReconnectTimerFired(lifecycleRef.current);
