@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import getpass
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +21,12 @@ ROOT = Path(__file__).resolve().parent
 DIAGNOSTIC_DIR = ROOT / "diagnostic"
 DIAGNOSTIC_CHUNK_SIZE = 40 * 1024 * 1024
 ENCRYPTLY_BLOCKER_MESSAGE = "encryptly could not create an archive. You may have timed out; try launching it in the background and waiting for it to finish with no timeout due to a bug in encryptly."
+DIAGNOSTIC_ARTIFACT_RE = re.compile(
+    r"^build-(?P<commit>[0-9a-f]{8})(?:(?:-part\d{3})?\.logd|\.json|-metadata\.json)$"
+)
+DIAGNOSTIC_COMMIT_SUBJECT_RE = re.compile(
+    r"^Add build diagnostics for (?P<commit>[0-9a-f]{8})$"
+)
 
 
 def current_commit_id() -> str:
@@ -47,6 +56,35 @@ def diagnostic_paths_for_commit() -> tuple[Path, Path, str]:
     return logd_path, metadata_path, commit_id
 
 
+def active_diagnostic_target_commit() -> Optional[str]:
+    """Return the implementation commit protected by the latest diagnostic commit."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    match = DIAGNOSTIC_COMMIT_SUBJECT_RE.match(result.stdout.strip())
+    if not match:
+        return None
+    return match.group("commit").lower()
+
+
+def protected_diagnostic_commits(current_commit: str) -> set[str]:
+    """Protect current HEAD plus the implementation commit named by a diagnostic commit."""
+    protected = {current_commit.lower()}
+    diagnostic_target = active_diagnostic_target_commit()
+    if diagnostic_target:
+        protected.add(diagnostic_target)
+    return protected
+
+
 def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SIZE) -> list[Path]:
     """Split an oversized .logd into numbered .logd chunks and remove the original."""
     if logd_path.stat().st_size <= chunk_size:
@@ -69,6 +107,82 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
     return chunks
 
 
+def scan_stale_diagnostic_artifacts(
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+    protected_commits: Optional[set[str]] = None,
+) -> DiagnosticCleanupResult:
+    """Find stale generated diagnostic artifacts while preserving the current commit."""
+    current = (current_commit or current_commit_id()).lower()
+    protected = {commit.lower() for commit in (protected_commits or {current})}
+    stale: list[DiagnosticCleanupEntry] = []
+    preserved_current: list[Path] = []
+    ignored: list[Path] = []
+
+    if not diagnostic_dir.exists():
+        return DiagnosticCleanupResult(current, stale, [], preserved_current, ignored)
+
+    for artifact in sorted(path for path in diagnostic_dir.iterdir() if path.is_file()):
+        match = DIAGNOSTIC_ARTIFACT_RE.match(artifact.name)
+        if not match:
+            ignored.append(artifact)
+            continue
+        artifact_commit = match.group("commit").lower()
+        if artifact_commit in protected:
+            preserved_current.append(artifact)
+            continue
+        stale.append(DiagnosticCleanupEntry(path=artifact, commit_id=artifact_commit))
+
+    return DiagnosticCleanupResult(current, stale, [], preserved_current, ignored)
+
+
+def cleanup_stale_diagnostic_artifacts(
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+    apply: bool = False,
+) -> DiagnosticCleanupResult:
+    """Report or delete stale diagnostic artifacts. Dry-run is the default."""
+    current = (current_commit or current_commit_id()).lower()
+    protected = protected_diagnostic_commits(current) if current_commit is None else {current}
+    result = scan_stale_diagnostic_artifacts(diagnostic_dir, current, protected)
+    deleted: list[Path] = []
+
+    if apply:
+        for entry in result.stale:
+            try:
+                entry.path.unlink()
+                deleted.append(entry.path)
+            except FileNotFoundError:
+                deleted.append(entry.path)
+
+    return DiagnosticCleanupResult(
+        current_commit=result.current_commit,
+        stale=result.stale,
+        deleted=deleted,
+        preserved_current=result.preserved_current,
+        ignored=result.ignored,
+    )
+
+
+def print_diagnostic_cleanup(result: DiagnosticCleanupResult, apply: bool) -> None:
+    action = "Deleted" if apply else "Would delete"
+    mode = "apply" if apply else "dry-run"
+    print(f"  {color('Diagnostic cleanup', Colors.BOLD)} ({mode})")
+    print(f"  current commit: {result.current_commit}")
+
+    if result.stale:
+        for entry in result.stale:
+            relpath = entry.path.relative_to(ROOT) if entry.path.is_relative_to(ROOT) else entry.path
+            print(f"  {color('▸', Colors.YELLOW)} {action} {relpath}")
+    else:
+        print(f"  {color('✓', Colors.GREEN)} No stale diagnostic artifacts found")
+
+    if result.preserved_current:
+        print(f"  {color('✓', Colors.GREEN)} Preserved {len(result.preserved_current)} current artifact(s)")
+    if result.ignored:
+        print(f"  {color('•', Colors.GRAY)} Ignored {len(result.ignored)} non-diagnostic file(s)")
+
+
 @dataclass
 class Module:
     name: str
@@ -78,6 +192,21 @@ class Module:
     clean_cmd: list[str]
     build_dir: Optional[Path] = None
     env: Optional[dict[str, str]] = None
+
+
+@dataclass(frozen=True)
+class DiagnosticCleanupEntry:
+    path: Path
+    commit_id: str
+
+
+@dataclass(frozen=True)
+class DiagnosticCleanupResult:
+    current_commit: str
+    stale: list[DiagnosticCleanupEntry]
+    deleted: list[Path]
+    preserved_current: list[Path]
+    ignored: list[Path]
 
 MODULES = [
     Module(
@@ -822,6 +951,10 @@ Examples:
   python3 build.py -m backend         Build only backend
   python3 build.py -m frontend,market Build frontend and market
   python3 build.py --clean            Clean all artifacts
+  python3 build.py --clean-diagnostics
+                                      Dry-run stale diagnostic cleanup
+  python3 build.py --clean-diagnostics --apply
+                                      Delete stale diagnostic artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
 
@@ -839,6 +972,14 @@ Diagnostic bundle:
         help="Clean build artifacts instead of building",
     )
     parser.add_argument(
+        "--clean-diagnostics", action="store_true",
+        help="List stale diagnostic artifacts; add --apply to delete them",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Apply a cleanup action. Currently only used with --clean-diagnostics",
+    )
+    parser.add_argument(
         "--release", action="store_true",
         help="Build in release mode (Rust backend)",
     )
@@ -853,9 +994,24 @@ Diagnostic bundle:
 
     args = parser.parse_args()
 
-    print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
+    mode_label = "diagnostic cleanup" if args.clean_diagnostics else "building"
+    print(f"\n  {color('Tent of Trials: ' + mode_label, Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
+
+    if args.apply and not args.clean_diagnostics:
+        print(f"  {color('✗ --apply requires --clean-diagnostics', Colors.RED)}")
+        return 1
+
+    if args.clean_diagnostics:
+        result = cleanup_stale_diagnostic_artifacts(
+            DIAGNOSTIC_DIR,
+            apply=args.apply,
+        )
+        print_diagnostic_cleanup(result, args.apply)
+        if not args.apply and result.stale:
+            print(f"\n  {color('Dry-run only. Re-run with --clean-diagnostics --apply to delete stale files.', Colors.GRAY)}")
+        return 0
 
     if args.list:
         print(f"  {color('Available modules:', Colors.BOLD)}")
