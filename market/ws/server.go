@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,19 +18,15 @@ import (
 	"go.uber.org/zap"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-}
+const allowedOriginsEnv = "TENT_MARKET_WS_ALLOWED_ORIGINS"
 
 type Client struct {
-	hub      *Hub
-	conn     *websocket.Conn
-	send     chan []byte
-	subs     map[types.Symbol]struct{}
-	remote   string
-	mu       sync.Mutex
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	subs   map[types.Symbol]struct{}
+	remote string
+	mu     sync.Mutex
 }
 
 type Hub struct {
@@ -39,11 +39,20 @@ type Hub struct {
 }
 
 type Server struct {
-	hub    *Hub
-	engine *matching.MatchingEngine
-	logger *zap.Logger
-	port   int
-	srv    *http.Server
+	hub      *Hub
+	engine   *matching.MatchingEngine
+	logger   *zap.Logger
+	port     int
+	upgrader websocket.Upgrader
+	srv      *http.Server
+}
+
+type ServerConfig struct {
+	AllowedOrigins []string
+}
+
+type originPolicy struct {
+	allowed map[string]struct{}
 }
 
 func NewHub(logger *zap.Logger) *Hub {
@@ -96,11 +105,18 @@ func (h *Hub) Run() {
 }
 
 func NewServer(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int) *Server {
+	return NewServerWithConfig(hub, engine, logger, port, ServerConfig{
+		AllowedOrigins: parseAllowedOrigins(os.Getenv(allowedOriginsEnv)),
+	})
+}
+
+func NewServerWithConfig(hub *Hub, engine *matching.MatchingEngine, logger *zap.Logger, port int, config ServerConfig) *Server {
 	return &Server{
-		hub:    hub,
-		engine: engine,
-		logger: logger,
-		port:   port,
+		hub:      hub,
+		engine:   engine,
+		logger:   logger,
+		port:     port,
+		upgrader: newWebSocketUpgrader(newOriginPolicy(config.AllowedOrigins)),
 	}
 }
 
@@ -129,7 +145,7 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error("websocket upgrade failed", zap.Error(err))
 		return
@@ -197,6 +213,103 @@ func (c *Client) readPump() {
 
 		c.mu.Unlock()
 	}
+}
+
+func newWebSocketUpgrader(policy originPolicy) websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     policy.Check,
+	}
+}
+
+func newOriginPolicy(origins []string) originPolicy {
+	allowed := make(map[string]struct{})
+	for _, origin := range origins {
+		if normalized, ok := normalizeOrigin(origin); ok {
+			allowed[normalized] = struct{}{}
+		}
+	}
+	return originPolicy{allowed: allowed}
+}
+
+func (p originPolicy) Check(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	normalizedOrigin, ok := normalizeOrigin(origin)
+	if !ok {
+		return false
+	}
+	if _, ok := p.allowed[normalizedOrigin]; ok {
+		return true
+	}
+	if isSameHostOrigin(normalizedOrigin, r.Host) {
+		return true
+	}
+	if isLocalHostOrigin(normalizedOrigin) && isLocalHost(r.Host) {
+		return true
+	}
+	return false
+}
+
+func parseAllowedOrigins(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			origins = append(origins, part)
+		}
+	}
+	return origins
+}
+
+func normalizeOrigin(origin string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	return scheme + "://" + strings.ToLower(u.Host), true
+}
+
+func isSameHostOrigin(origin, requestHost string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, requestHost)
+}
+
+func isLocalHostOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return isLocalHost(u.Host)
+}
+
+func isLocalHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") || host == "::1" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c *Client) writePump() {
