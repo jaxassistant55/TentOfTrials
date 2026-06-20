@@ -155,6 +155,14 @@ MODULES = [
         build_dir=None,
     ),
     Module(
+        name="log-watchdog-exit-codes",
+        language="Perl",
+        dir=ROOT,
+        build_cmd=["sh", "v2/tests/test_log_watchdog_exit_codes.sh"],
+        clean_cmd=["echo", "Perl watchdog tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="nfc-scanner",
         language="Lua",
         dir=ROOT / "frailbox" / "nfc",
@@ -368,6 +376,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 

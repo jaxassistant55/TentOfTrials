@@ -147,6 +147,24 @@ that no tables are missing. The row count check was added after an incident
 where a backup was taken while a migration was running, resulting in an
 incomplete backup that restored without error but was missing 3 tables.
 
+### Log Watchdog Exit Codes
+
+`v2/scripts/log_watchdog.pl --scan-once <log-file>...` reads the supplied log
+files once, prints the watchdog status summary, and exits without loading Slack
+alert configuration or entering daemon watch mode.
+
+The tested exit-code contract is:
+
+- clean logs exit `0`
+- warning-only matches exit `0`
+- error or critical matches exit non-zero by default
+- `--no-fail` keeps the exit code at `0` while still reporting error and
+  critical matches in the summary
+
+The contract is covered by `v2/tests/test_log_watchdog_exit_codes.sh` with
+clean, warning-only, and error fixtures under
+`v2/tests/fixtures/log_watchdog/`.
+
 ### Recovery Procedure
 
 1. Identify the recovery point (time or transaction ID)
