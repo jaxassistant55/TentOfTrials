@@ -12,7 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple, Dict, Any
 
 ROOT = Path(__file__).resolve().parent
 DIAGNOSTIC_DIR = ROOT / "diagnostic"
@@ -815,6 +815,85 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
           f"{color(str(failed) + ' failed', Colors.RED)}, "
           f"{total_time:.1f}s total")
 
+
+def scan_diagnostic_artifacts(diagnostic_dir: Path = DIAGNOSTIC_DIR) -> Tuple[List[str], List[str], int, int]:
+    """Scan diagnostic directory and return artifact retention information.
+
+    Returns:
+        Tuple of (current_commit_artifacts, older_artifacts, total_count, total_bytes)
+    """
+    if not diagnostic_dir.exists():
+        return [], [], 0, 0
+
+    current_id = current_commit_id()
+    current_artifacts = []
+    older_artifacts = []
+    total_bytes = 0
+
+    # Scan all build artifacts (both .logd and .json files)
+    artifacts = list(diagnostic_dir.glob("build-*.logd")) + list(diagnostic_dir.glob("build-*.json"))
+    for artifact in artifacts:
+        if not artifact.is_file():
+            continue
+
+        # Extract commit ID from filename (e.g., "build-abc12345.logd" -> "abc12345")
+        # Handle both "build-abc12345.logd" and "build-abc12345-part001.logd" formats
+        name = artifact.name
+        if name.startswith("build-"):
+            # Remove "build-" prefix
+            without_prefix = name[6:]
+            # Remove file extension
+            without_ext = without_prefix.rsplit(".", 1)[0] if "." in without_prefix else without_prefix
+            # Remove "-part###" suffix if present
+            commit_id = without_ext.rsplit("-part", 1)[0]
+        else:
+            continue
+
+        file_size = artifact.stat().st_size
+        total_bytes += file_size
+
+        # Calculate relative path from ROOT (the repository root)
+        try:
+            rel_path = str(artifact.relative_to(ROOT))
+        except ValueError:
+            # If artifact is not under ROOT, use relative to diagnostic_dir
+            rel_path = str(artifact.relative_to(diagnostic_dir))
+
+        if commit_id == current_id:
+            current_artifacts.append(rel_path)
+        else:
+            older_artifacts.append(rel_path)
+
+    total_count = len(current_artifacts) + len(older_artifacts)
+    return sorted(current_artifacts), sorted(older_artifacts), total_count, total_bytes
+
+
+def report_retention(diagnostic_dir: Path = DIAGNOSTIC_DIR, output_format: str = "json") -> Dict[str, Any]:
+    """Generate a diagnostic artifact retention report.
+
+    Args:
+        diagnostic_dir: Path to diagnostic directory to scan
+        output_format: Format for output ('json' is currently supported)
+
+    Returns:
+        Dictionary containing retention information
+    """
+    current_id = current_commit_id()
+    current_artifacts, older_artifacts, total_count, total_bytes = scan_diagnostic_artifacts(diagnostic_dir)
+
+    report = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "current_commit": current_id,
+        "current_commit_artifacts": current_artifacts,
+        "older_artifacts": older_artifacts,
+        "total_artifact_count": total_count,
+        "total_bytes": total_bytes,
+        "total_kilobytes": round(total_bytes / 1024.0, 1),
+        "total_megabytes": round(total_bytes / (1024 * 1024), 2),
+    }
+
+    return report
+
 def main():
     parser = argparse.ArgumentParser(
         description="Tent of Trials  -  Multi-Language Build System",
@@ -828,8 +907,9 @@ Examples:
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
 
-Diagnostic bundle:
-  python3 build.py
+Diagnostic commands:
+  python3 build.py                      Generate diagnostic bundle and build
+  python3 build.py --report-retention   Print diagnostic artifact retention status (JSON, read-only)
         """,
     )
     parser.add_argument(
@@ -853,12 +933,22 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--report-retention", action="store_true",
+        help="Print diagnostic artifact retention report as JSON and exit (read-only, safe for CI)",
+    )
 
     args = parser.parse_args()
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
+
+    if args.report_retention:
+        # Print retention report as JSON and exit (read-only, safe for CI)
+        report = report_retention()
+        print(json.dumps(report, indent=2))
+        return 0
 
     if args.list:
         print(f"  {color('Available modules:', Colors.BOLD)}")

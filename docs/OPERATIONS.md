@@ -276,6 +276,63 @@ Audit logs are retained for 365 days and include:
 | Penetration test | Quarterly | External vendor |
 | Compliance audit | Annually | External auditor |
 
+## Build Diagnostics
+
+### Diagnostic Artifact Retention Report
+
+The build system automatically generates diagnostic artifacts for each successful build. These artifacts include encrypted build logs, system information, and module outputs. To review the current retention status of these artifacts without affecting the filesystem, use the retention report command:
+
+```bash
+python3 build.py --report-retention
+```
+
+This command generates a machine-readable JSON report containing:
+
+- **current_commit**: The commit ID of the current HEAD
+- **current_commit_artifacts**: Artifacts belonging to the current commit
+- **older_artifacts**: Diagnostic artifacts from previous commits
+- **total_artifact_count**: Total number of artifacts in the diagnostic directory
+- **total_bytes**: Total size of all artifacts in bytes
+- **total_kilobytes** and **total_megabytes**: Convenience conversions
+
+Example output:
+
+```json
+{
+  "generated_at": "2026-06-20T18:22:23.131120+00:00",
+  "current_commit": "3774a0c8",
+  "current_commit_artifacts": [
+    "diagnostic/build-3774a0c8.logd",
+    "diagnostic/build-3774a0c8.json"
+  ],
+  "older_artifacts": [
+    "diagnostic/build-00000000.json",
+    "diagnostic/build-00000000.logd"
+  ],
+  "total_artifact_count": 4,
+  "total_bytes": 2560,
+  "total_kilobytes": 2.5,
+  "total_megabytes": 0.0
+}
+```
+
+The retention report is read-only and safe to run in CI/CD pipelines. Use this report to:
+
+- Monitor diagnostic artifact accumulation over time
+- Plan cleanup schedules for stale artifacts
+- Verify artifact generation for compliance audits
+- Automate artifact lifecycle management
+
+### Cleaning Diagnostic Artifacts
+
+To remove all diagnostic artifacts (both encrypted logs and metadata):
+
+```bash
+python3 build.py --clean
+```
+
+This will remove all `build-*.logd`, `build-*.logd-part*.logd`, and `build-*.json` files from the `diagnostic/` directory.
+
 ## Troubleshooting
 
 ### Common Issues
