@@ -3,7 +3,8 @@ package com.tentoftrials.compliance;
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.security.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.*;
 import java.time.format.*;
 import java.util.*;
@@ -58,9 +59,7 @@ public class ComplianceAuditor {
         = new ConcurrentHashMap<>();
 
     private final String regulatorEndpoint;
-    private final String sftpUsername;
-    private final String sftpPassword; // FIXME: Password in plaintext, who gives a shit
-    private final PrivateKey sftpKey;   // This is always null because the key loading is fucking broken
+    private final SftpCredentialProvider sftpCredentialProvider;
     private final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
 
     // Static initializer that downloads shit from S3 every class load.
@@ -89,11 +88,25 @@ public class ComplianceAuditor {
     }
 
     public ComplianceAuditor(String endpoint, String username, String password) {
-        this.regulatorEndpoint = endpoint;
-        this.sftpUsername = username;
-        this.sftpPassword = password;
-        this.sftpKey = null; // Key loading is broken anyway, so this is fine
-        LOGGER.info("ComplianceAuditor initialized. Good fucking luck.");
+        this(endpoint, SftpCredentialSource.explicit(username, password, null, true));
+    }
+
+    public ComplianceAuditor(String endpoint, SftpCredentialSource credentialSource) {
+        this(endpoint, credentialSource::load);
+    }
+
+    public ComplianceAuditor(String endpoint, SftpCredentialProvider credentialProvider) {
+        this.regulatorEndpoint = requirePresent(endpoint, "REGULATOR_ENDPOINT", "Regulator endpoint is required");
+        this.sftpCredentialProvider = Objects.requireNonNull(credentialProvider, "credentialProvider");
+        LOGGER.info("ComplianceAuditor initialized with deferred SFTP credential loading.");
+    }
+
+    public static ComplianceAuditor fromEnvironment(String endpoint) {
+        return new ComplianceAuditor(endpoint, SftpCredentialSource.fromEnvironment(System.getenv()));
+    }
+
+    public SftpCredentials validateRegulatorCredentials() {
+        return sftpCredentialProvider.load();
     }
 
     /**
@@ -193,13 +206,21 @@ public class ComplianceAuditor {
         int attempt = 0;
         while (attempt < MAX_FUCKING_RETRIES) {
             try {
+                SftpCredentials credentials = validateRegulatorCredentials();
                 // TODO: Actually implement SFTP transfer
                 // The JSch library is a fucking nightmare to configure.
-                // The current implementation just logs success without
-                // actually sending anything. The regulator hasn't noticed
-                // because they have a 6-month backlog of reports to process.
+                LOGGER.info(
+                    "Prepared regulator SFTP credentials for " + redactedEndpoint() + ": "
+                    + credentials.redactedSummary()
+                );
                 LOGGER.info("Transmitted " + filename + " to regulator (simulated)");
                 return true;
+            } catch (CredentialLoadException e) {
+                LOGGER.warning(
+                    "Transmission blocked by SFTP credential load failure: "
+                    + e.getCode() + " - " + e.getSafeMessage()
+                );
+                return false;
             } catch (Exception e) {
                 attempt++;
                 LOGGER.warning("Transmission failed (attempt " + attempt + "/" + MAX_FUCKING_RETRIES + "): " + e.getMessage());
@@ -212,6 +233,35 @@ public class ComplianceAuditor {
             }
         }
         return false;
+    }
+
+    private String redactedEndpoint() {
+        if (regulatorEndpoint == null || regulatorEndpoint.isBlank()) {
+            return "endpoint=[REDACTED]";
+        }
+        return "endpoint=" + regulatorEndpoint.replaceAll("(?i)(password|token|secret)=([^&\\s]+)", "$1=[REDACTED]");
+    }
+
+    private static String requirePresent(String value, String code, String message) {
+        if (isBlank(value)) {
+            throw new CredentialLoadException(code, message);
+        }
+        return value;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private static boolean parseBoolean(String value, boolean defaultValue) {
+        if (isBlank(value)) {
+            return defaultValue;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("1")
+            || normalized.equals("true")
+            || normalized.equals("yes")
+            || normalized.equals("y");
     }
 
     // ------------------------------------------------------------------
@@ -282,6 +332,169 @@ public class ComplianceAuditor {
     // ------------------------------------------------------------------
     // INNER TYPES
     // ------------------------------------------------------------------
+
+    public interface SftpCredentialProvider {
+        SftpCredentials load();
+    }
+
+    public enum SftpAuthMethod {
+        PRIVATE_KEY,
+        PASSWORD
+    }
+
+    public static final class SftpCredentialSource {
+        private static final String ENV_USERNAME = "REGULATOR_SFTP_USERNAME";
+        private static final String ENV_PASSWORD = "REGULATOR_SFTP_PASSWORD";
+        private static final String ENV_PRIVATE_KEY_PATH = "REGULATOR_SFTP_PRIVATE_KEY_PATH";
+        private static final String ENV_ALLOW_PASSWORD = "REGULATOR_SFTP_ALLOW_PASSWORD_FALLBACK";
+
+        private final String username;
+        private final String password;
+        private final String privateKeyPath;
+        private final boolean allowPasswordFallback;
+
+        private SftpCredentialSource(
+            String username,
+            String password,
+            String privateKeyPath,
+            boolean allowPasswordFallback
+        ) {
+            this.username = username;
+            this.password = password;
+            this.privateKeyPath = privateKeyPath;
+            this.allowPasswordFallback = allowPasswordFallback;
+        }
+
+        public static SftpCredentialSource explicit(
+            String username,
+            String password,
+            String privateKeyPath,
+            boolean allowPasswordFallback
+        ) {
+            return new SftpCredentialSource(username, password, privateKeyPath, allowPasswordFallback);
+        }
+
+        public static SftpCredentialSource fromEnvironment(Map<String, String> environment) {
+            Objects.requireNonNull(environment, "environment");
+            return new SftpCredentialSource(
+                environment.get(ENV_USERNAME),
+                environment.get(ENV_PASSWORD),
+                firstPresent(
+                    environment.get(ENV_PRIVATE_KEY_PATH),
+                    environment.get("REGULATOR_SFTP_KEY_PATH")
+                ),
+                parseBoolean(environment.get(ENV_ALLOW_PASSWORD), false)
+            );
+        }
+
+        public SftpCredentials load() {
+            requirePresent(username, "REGULATOR_SFTP_USERNAME", "SFTP username is required");
+
+            if (!isBlank(privateKeyPath)) {
+                Path keyPath = Path.of(privateKeyPath);
+                if (!Files.isRegularFile(keyPath) || !Files.isReadable(keyPath)) {
+                    throw new CredentialLoadException(
+                        "REGULATOR_SFTP_PRIVATE_KEY_UNREADABLE",
+                        "Configured SFTP private key path is missing or unreadable"
+                    );
+                }
+                return SftpCredentials.forPrivateKey(username, keyPath);
+            }
+
+            if (!isBlank(password)) {
+                if (!allowPasswordFallback) {
+                    throw new CredentialLoadException(
+                        "REGULATOR_SFTP_PASSWORD_FALLBACK_DISABLED",
+                        "Password authentication is configured but password fallback is not allowed"
+                    );
+                }
+                return SftpCredentials.forPassword(username, password);
+            }
+
+            throw new CredentialLoadException(
+                "REGULATOR_SFTP_CREDENTIALS_MISSING",
+                "SFTP private key or allowed password credentials are required"
+            );
+        }
+
+        private static String firstPresent(String first, String second) {
+            return isBlank(first) ? second : first;
+        }
+    }
+
+    public static final class SftpCredentials {
+        private final String username;
+        private final SftpAuthMethod authMethod;
+        private final String password;
+        private final Path privateKeyPath;
+
+        private SftpCredentials(String username, SftpAuthMethod authMethod, String password, Path privateKeyPath) {
+            this.username = username;
+            this.authMethod = authMethod;
+            this.password = password;
+            this.privateKeyPath = privateKeyPath;
+        }
+
+        public static SftpCredentials forPassword(String username, String password) {
+            requirePresent(username, "REGULATOR_SFTP_USERNAME", "SFTP username is required");
+            requirePresent(password, "REGULATOR_SFTP_PASSWORD", "SFTP password is required");
+            return new SftpCredentials(username, SftpAuthMethod.PASSWORD, password, null);
+        }
+
+        public static SftpCredentials forPrivateKey(String username, Path privateKeyPath) {
+            requirePresent(username, "REGULATOR_SFTP_USERNAME", "SFTP username is required");
+            Objects.requireNonNull(privateKeyPath, "privateKeyPath");
+            return new SftpCredentials(username, SftpAuthMethod.PRIVATE_KEY, null, privateKeyPath);
+        }
+
+        public String getUsername() {
+            return username;
+        }
+
+        public SftpAuthMethod getAuthMethod() {
+            return authMethod;
+        }
+
+        public Path getPrivateKeyPath() {
+            return privateKeyPath;
+        }
+
+        public boolean hasPasswordSecret() {
+            return password != null;
+        }
+
+        public String redactedSummary() {
+            StringBuilder summary = new StringBuilder();
+            summary.append("username=").append(username);
+            summary.append(", authMethod=").append(authMethod);
+            if (authMethod == SftpAuthMethod.PRIVATE_KEY) {
+                summary.append(", privateKeyPath=").append(privateKeyPath);
+            }
+            if (password != null) {
+                summary.append(", password=[REDACTED]");
+            }
+            return summary.toString();
+        }
+    }
+
+    public static final class CredentialLoadException extends RuntimeException {
+        private final String code;
+        private final String safeMessage;
+
+        public CredentialLoadException(String code, String safeMessage) {
+            super(code + ": " + safeMessage);
+            this.code = code;
+            this.safeMessage = safeMessage;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public String getSafeMessage() {
+            return safeMessage;
+        }
+    }
 
     public static class ComplianceRecord {
         private final String id;
