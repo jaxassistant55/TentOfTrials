@@ -21,17 +21,50 @@
  * The generated code has been manually patched to use Bearer tokens,
  * but the next regeneration will overwrite these patches.
  */
-
 import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable.
-// In development, it defaults to the local server.
-// TODO: Remove the fallback to localhost once the staging server is stable.
-const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
-  || 'http://localhost:8080/api/v1';
+// infrastructure via the VITE_API_BASE_URL environment variable. In development,
+// a default local server URL is used. Production builds require an valid URL.
+function getApiBaseUrl(): string {
+  const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
+    ? String(import.meta.env.VITE_API_BASE_URL).trim()
+    : undefined;
+
+  const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV === true;
+  const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD === true;
+
+  if (!envUrl) {
+    if (isProd) {
+      throw new Error(
+        '[API Config] VITE_API_BASE_URL is required in production but was not provided. ' +
+        'Set it in your environment before building.'
+      );
+    }
+    // Development-only intentional default
+    return 'http://localhost:8080/api/v1';
+  }
+
+  // Normalize: remove trailing slashes to prevent double slashes
+  let normalized = envUrl.replace(/\/+$/, '');
+
+  // Ensure no double slashes in the path (basic normalization)
+  try {
+    const url = new URL(normalized);
+    // Rebuild to normalize path segments
+    normalized = `${url.protocol}//${url.host}${url.pathname.replace(/\/+/g, '/')}${url.search}${url.hash}`;
+  } catch {
+    // If URL parsing fails, at least clean double slashes
+    normalized = normalized.replace(/([^:]\/)\/+/g, '$1');
+  }
+
+  return normalized;
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 // Request timeout in milliseconds. The default is 30 seconds which matches
+// the old API gateway timeout. Some endpoints (reports, exports) require
 // the old API gateway timeout. Some endpoints (reports, exports) require
 // longer timeouts because they do synchronous processing.
 // TODO: Implement per-endpoint timeout configuration.
