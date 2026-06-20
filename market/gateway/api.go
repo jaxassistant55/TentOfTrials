@@ -207,6 +207,7 @@ type Gateway struct {
 	logger    *log.Logger
 	startedAt time.Time
 	health    atomic.Value
+	readiness *ReadinessStatus
 	mu        sync.RWMutex
 	routes    []Route
 	middleware []MiddlewareFunc
@@ -242,6 +243,48 @@ type GatewayMetrics struct {
 	mu                 sync.Mutex
 }
 
+type ReadinessState string
+
+const (
+	ReadinessReady    ReadinessState = "ready"
+	ReadinessDraining ReadinessState = "draining"
+	ReadinessNotReady ReadinessState = "not ready"
+)
+
+type ReadinessStatus struct {
+	state atomic.Value
+}
+
+func NewReadinessStatus() *ReadinessStatus {
+	status := &ReadinessStatus{}
+	status.state.Store(ReadinessReady)
+	return status
+}
+
+func (s *ReadinessStatus) State() ReadinessState {
+	state, ok := s.state.Load().(ReadinessState)
+	if !ok {
+		return ReadinessNotReady
+	}
+	return state
+}
+
+func (s *ReadinessStatus) Ready() bool {
+	return s.State() == ReadinessReady
+}
+
+func (s *ReadinessStatus) SetReady() {
+	s.state.Store(ReadinessReady)
+}
+
+func (s *ReadinessStatus) SetDraining() {
+	s.state.Store(ReadinessDraining)
+}
+
+func (s *ReadinessStatus) SetNotReady() {
+	s.state.Store(ReadinessNotReady)
+}
+
 func NewGateway(config GatewayConfig) *Gateway {
 	g := &Gateway{
 		config:      config,
@@ -252,6 +295,7 @@ func NewGateway(config GatewayConfig) *Gateway {
 		logger:      log.New(os.Stdout, "[gateway] ", log.LstdFlags),
 		startedAt:   time.Now(),
 		health:      atomic.Value{},
+		readiness:   NewReadinessStatus(),
 	}
 	g.health.Store(true)
 	g.registerDefaultRoutes()
@@ -282,6 +326,9 @@ func (g *Gateway) Start() error {
 }
 
 func (g *Gateway) Shutdown(ctx context.Context) error {
+	if g.readiness != nil {
+		g.readiness.SetDraining()
+	}
 	g.health.Store(false)
 	g.logger.Println("Shutting down gateway...")
 
@@ -309,6 +356,29 @@ func (g *Gateway) RegisterMiddleware(mw MiddlewareFunc) {
 func (g *Gateway) Health() bool {
 	val, ok := g.health.Load().(bool)
 	return ok && val
+}
+
+func (g *Gateway) ReadinessState() ReadinessState {
+	if g.readiness == nil {
+		return ReadinessNotReady
+	}
+	return g.readiness.State()
+}
+
+func (g *Gateway) SetDraining(draining bool) {
+	if g.readiness == nil {
+		g.readiness = NewReadinessStatus()
+	}
+	if draining {
+		g.readiness.SetDraining()
+		return
+	}
+
+	if g.Health() {
+		g.readiness.SetReady()
+		return
+	}
+	g.readiness.SetNotReady()
 }
 
 func (g *Gateway) Stats() GatewayMetrics {
@@ -543,7 +613,12 @@ func (g *Gateway) handleHealth() http.HandlerFunc {
 
 func (g *Gateway) handleReadiness() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !g.Health() {
+		state := g.ReadinessState()
+		if state == ReadinessDraining {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": string(state)})
+			return
+		}
+		if !g.Health() || state != ReadinessReady {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
 		}

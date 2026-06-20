@@ -37,6 +37,21 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Market Gateway Readiness Draining
+
+The market gateway exposes separate readiness and liveness probes:
+
+| Probe | Endpoint | Ready Response | Draining Response |
+|-------|----------|----------------|-------------------|
+| Readiness | `/health/ready` | `200 {"status":"ready"}` | `503 {"status":"draining"}` |
+| Liveness | `/health/live` | `200 {"status":"alive"}` | `200 {"status":"alive"}` |
+
+Deployment coordinators should call `Gateway.SetDraining(true)` before removing
+an instance from service. A draining gateway remains live, but readiness returns
+non-ready so load balancers and rollout controllers can stop sending new traffic.
+Calling `Gateway.SetDraining(false)` restores readiness when the gateway is
+healthy.
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
