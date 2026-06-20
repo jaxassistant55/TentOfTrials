@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-06-20T05:26:22.489301+00:00",
+  "commit": "87269244",
+  "diagnostic_logd": [
+    "diagnostic\\build-87269244-part001.logd",
+    "diagnostic\\build-87269244-part002.logd",
+    "diagnostic\\build-87269244-part003.logd",
+    "diagnostic\\build-87269244-part004.logd",
+    "diagnostic\\build-87269244-part005.logd",
+    "diagnostic\\build-87269244-part006.logd",
+    "diagnostic\\build-87269244-part007.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "a8abe9141c52a7a34ab0",
+  "decrypt_command": "encryptly unpack diagnostic\\build-87269244.logd <outdir> --password a8abe9141c52a7a34ab0",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "frontend",
+      "status": "PASS",
+      "elapsed_seconds": 3.62,
+      "artifact": "C:\\Users\\42099\\Documents\\Codex\\2026-06-20\\new-chat\\work\\jaxassistant55-TentOfTrials-submit\\frontend\\dist",
+      "output": ""
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic\\build-87269244-part001.logd, diagnostic\\build-87269244-part002.logd, diagnostic\\build-87269244-part003.logd, diagnostic\\build-87269244-part004.logd, diagnostic\\build-87269244-part005.logd, diagnostic\\build-87269244-part006.logd, diagnostic\\build-87269244-part007.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
