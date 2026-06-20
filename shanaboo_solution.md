@@ -1,202 +1,193 @@
  ```diff
 --- a/v2/services/market_stream.rb
 +++ b/v2/services/market_stream.rb
-@@ -1,4 +1,4 @@
--#!/usr/bin/env ruby
-+#!/usr/bin/env ruby
+@@ -1,3 +1,4 @@
++
+ #!/usr/bin/env ruby
  # frozen_string_literal: true
  
- # MarketStream  -  v2 Market Data Streaming Service
-@@ -86,7 +86,7 @@
-   # API
+@@ -82,7 +83,7 @@
    API_PORT             = 8083
    API_HOST             = '0.0.0.0'
--  API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
+   API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
 -  API_AUTH_REQUIRED    = false  # TODO: Add auth. It's on the roadmap. Really.
-+  API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
 +  API_AUTH_REQUIRED    = ENV.fetch('MARKET_STREAM_AUTH_REQUIRED', 'false').downcase == 'true'
  
    # Market Data
    MAX_TICK_HISTORY     = 10_000  # ticks per instrument. In memory. On the heap.
-@@ -94,6 +94,12 @@
+@@ -91,6 +92,9 @@
    BATCH_FLUSH_INTERVAL = 0.1     # seconds. 100ms batches. Very modern.
  end
  
-+# ===─ Authentication Helpers ================================================================================
-+
-+def auth_enabled?
-+  Constants::API_AUTH_REQUIRED
-+end
++# Auth configuration accessor
++AUTH_ENABLED = Constants::API_AUTH_REQUIRED
 +
  # ===─ Logger Setup ==========================================================================================
  
  # In v2, we use a REAL logging framework with levels and everything.
-@@ -156,6 +162,12 @@
-     @logger ||= Logger.new(STDOUT)
-   end
- 
-+  def authenticate!
-+    return unless auth_enabled?
-+    auth = env['HTTP_AUTHORIZATION']
-+    halt 401, { error: 'Unauthorized' }.to_json unless auth && valid_token?(auth)
-+  end
-+
-   def valid_token?(auth_header)
-     # Expected format: "Bearer <token>"
-     scheme, token = auth_header.to_s.split(' ', 2)
-@@ -163,6 +175,10 @@
-     # In production, validate against a real auth service or secret store
-     token == 'dev-token'
-   end
-+
-+  def auth_enabled?
-+    Constants::API_AUTH_REQUIRED
-+  end
+@@ -145,6 +149,7 @@
+   class UnauthorizedError < StandardError; end
+   class RateLimitError < StandardError; end
+   class NotFoundError < StandardError; end
++  class ForbiddenError < StandardError; end
  end
  
- # ===─ REST API ==============================================================================================
-@@ -170,6 +186,7 @@
+ # ===─ Market Data Types ===================================================================================
+@@ -312,6 +317,30 @@
+   end
+ end
+ 
++# ===─ Authentication Helpers ================================================================================
++
++module AuthHelper
++  def self.authenticate!(env)
++    return true unless AUTH_ENABLED
++
++    auth_header = env['HTTP_AUTHORIZATION"] || env["Authorization"]
++    raise Errors::UnauthorizedError, "Missing authorization header" unless auth_header
++
++    # Expect "Bearer <token>"
++    unless auth_header.start_with?("Bearer ")
++      raise Errors::UnauthorizedError, "Invalid authorization format"
++    end
++
++    token = auth_header.sub("Bearer ", "")
++    valid_token = ENV["MARKET_STREAM_API_TOKEN"]
++
++    unless valid_token && token == valid_token
++      raise Errors::UnauthorizedError, "Invalid credentials"
++    end
++
++    true
++  end
++end
++
+ # ===─ REST API =============================================================================================
+ 
  class MarketStreamAPI < Sinatra::Base
-   helpers MarketStreamHelpers
- 
-+  before { authenticate! }
-+
+@@ -320,6 +349,7 @@
    set :port, Constants::API_PORT
-   set :bind, Constants::API_HOST
+   set :host, Constants::API_HOST
+   set :logger, LOGGER
++  set :auth_enabled, AUTH_ENABLED
  
-@@ -194,7 +211,7 @@
-   get '/api/v2/market/stream' do
-     content_type :json
-     {
--      status: 'available',
-+      status: 'available',
-       version: V2_VERSION,
-       auth_required: Constants::API_AUTH_REQUIRED
-     }.to_json
-@@ -204,7 +221,7 @@
-   get '/api/v2/market/ticks/:instrument' do
-     instrument = params[:instrument].upcase
-     limit = [params[:limit]&.to_i || 100, Constants::MAX_TICK_HISTORY].min
--    
-+
-     ticks = MarketDataStore.instance.ticks_for(instrument).last(limit)
-     {
-       instrument: instrument,
-@@ -217,7 +234,7 @@
-   # Historical data endpoint
-   get '/api/v2/market/historical/:instrument' do
-     instrument = params[:instrument].upcase
--    from = params[:from]
-+    from = params[:from]
-     to = params[:to]
- 
-     {
-@@ -231,7 +248,7 @@
-   # Subscribe to real-time updates
-   post '/api/v2/market/subscribe' do
-     instruments = params[:instruments] || []
--    halt 400, { error: 'No instruments provided' }.to_json if instruments.empty?
-+    halt 400, { error: 'No instruments provided' }.to_json if instruments.empty?
- 
-     {
-       subscribed: instruments,
-@@ -243,7 +260,7 @@
-   # Health check (lies)
-   get '/health' do
-     content_type :json
--    { status: 'OK', version: V2_VERSION }.to_json
-+    { status: 'OK', version: V2_VERSION }.to_json
-   end
- end
- 
-@@ -256,7 +273,7 @@
-   def initialize
-     @clients = []
-     @mutex = Mutex.new
--  end
-+  end
- 
-   def add(client)
-     @mutex.synchronize { @clients << client }
-@@ -265,7 +282,7 @@
-   def remove(client)
-     @mutex.synchronize { @clients.delete(client) }
-   end
--  
-+
-   def broadcast(message)
-     @mutex.synchronize do
-       @clients.each do |client|
-@@ -283,7 +300,7 @@
-   def initialize
-     @ticks = {}
-     @mutex = Mutex.new
--  end
-+  end
- 
-   def record(tick)
-     @mutex.synchronize do
-@@ -293,7 +310,7 @@
-       @ticks[instrument] << tick
+   configure do
+     use Rack::CommonLogger, LOGGER
+@@ -329,6 +359,7 @@
+     errors = {
+       "UnauthorizedError" => [401, "Unauthorized"],
+       "RateLimitError"    => [429, "Too Many Requests"],
++      "ForbiddenError"    => [403, "Forbidden"],
+       "NotFoundError"     => [404, "Not Found"],
+       "StandardError"     => [500, "Internal Server Error"]
+     }
+@@ -340,6 +371,12 @@
      end
    end
--  
-+
-   def ticks_for(instrument)
-     @mutex.synchronize do
-       @ticks[instrument] || []
-@@ -308,7 +325,7 @@
-   def initialize
-     @running = false
-     @thread = nil
--  end
+ 
++  before do
++    # Skip auth for health check endpoint
++    return if request.path_info == "/health"
++    AuthHelper.authenticate!(env)
 +  end
- 
-   def start
-     return if @running
-@@ -316,7 +333,7 @@
-     @thread = Thread.new { run }
-     logger.info "MarketStreamService started"
-   end
--  
 +
-   def stop
-     @running = false
-     @thread&.join(5)
-@@ -329,7 +346,7 @@
-     EM.run do
-       ws = nil
-       connect = lambda do
--        ws = EventMachine::WebSocketClient.connect("ws://exchange:8080/stream")
-+        ws = EventMachine::WebSocketClient.connect("ws://exchange:8080/stream")
- 
-         ws.callback do
-           logger.info "Connected to exchange WebSocket"
-@@ -340,7 +357,7 @@
-           begin
-             data = JSON.parse(msg)
-             MarketDataStore.instance.record(data)
--            ClientManager.instance.broadcast(data)
-+            ClientManager.instance.broadcast(data)
-           rescue JSON::ParserError => e
-             logger.error "Failed to parse tick: #{e.message}"
-           end
-@@ -349,7 +366,7 @@
-         ws.errback do |e|
-           logger.error "WebSocket error: #{e.inspect}"
-         end
--        
-+
-         ws.disconnect do
-           logger.warn "WebSocket disconnected, reconnecting..."
-           EM.add_timer(5, &connect)
-@@ -366,7 +383,7 @@
-   service = MarketStreamService.new
-   service.start
- 
--  trap("INT") do
-+  trap("INT") do
-     service.stop
-     exit
+   # Health check. Returns "OK" even when dying.
+   get '/health' do
+     content_type :json
+@@ -348,6 +385,7 @@
+       version: V2_VERSION,
+       build: V2_BUILD,
+       uptime: Process.clock_gettime(Process::CLOCK_MONOTONIC) - START_TIME,
++      auth_enabled: AUTH_ENABLED,
+       status: 'OK'
+     }.to_json
    end
-@@ -377,3
+@@ -433,6 +471,7 @@
+   end
+ end
+ 
++
+ # ===─ Main Entry Point =====================================================================================
+ 
+ if __FILE__ == $0
+@@ -444,6 +483,7 @@
+     LOGGER.info "Starting MarketStream v#{V polished} on port #{Constants::API_PORT}"
+     LOGGER.info "WebSocket endpoint: #{Constants::WS_EXCHANGE_URL}"
+     LOGGER.info "Redis: #{Constants::REDIS_URL}"
++    LOGGER.info "Auth enabled: #{AUTH_ENABLED}"
+ 
+     # Start the WebSocket client in a separate thread
+     ws_thread = Thread.new do
+@@ -466,3 +506,4 @@
+     LOGGER.error "Fatal error: #{e.message}"
+   end
+ end
++
+--- /dev/null
++++ b/v2/services/market_stream_test.rb
+@@ -0,0 +1,120 @@
++#!/usr/bin/env ruby
++# frozen_string_literal: true
++
++# Tests for market_stream.rb authentication gate
++#
++# Run with: ruby v2/services/market_stream_test.rb
++
++require 'minitest/autorun'
++require 'rack/test'
++
++# Load the service (adjust load path as needed)
++$LOAD_PATH.unshift File.expand_path('../', __dir__)
++require_relative 'market_stream'
++
++class MarketStreamAPITest < Minitest::Test
++  include Rack::Test::Methods
++
++  def app
++    MarketStreamAPI
++  end
++
++  def setup
++    @original_auth = AUTH_ENABLED
++    @original_token = ENV["MARKET_STREAM_API_TOKEN"]
++  end
++
++  def teardown
++    # Reset auth state after each test
++    MarketStreamAPI.set :auth_enabled, @original_auth
++    Object.send(:remove_const, :AUTH_ENABLED) if Object.const_defined?(:AUTH_ENABLED)
++    Object.const_set(:AUTH_ENABLED, @original_auth)
++    ENV["MARKET_STREAM_API_TOKEN"] = @original_token
++  end
++
++  # Helper to enable auth for a test
++  def with_auth_enabled(token = "test-secret-token")
++    Object.send(:remove_const, :AUTH_ENABLED) if Object.const_defined?(:AUTH_ENABLED)
++    Object.const_set(:AUTH_ENABLED, true)
++    MarketStreamAPI.set :auth_enabled, true
++    ENV[" EXTERNAL["MARKET_STREAM_API_TOKEN"] = token
++    yield
++  end
++
++  # === Health check (always public) ===
++
++  def test_health_without_auth
++    get '/health'
++    assert last_response.ok?
++    body = JSON.parse(last_response.body)
++    assert_equal "OK", body["status"]
++  end
++
++  # === Auth disabled mode ===
++
++  def test_protected_endpoint_without_auth_disabled
++    # Auth is disabled by default
++    get '/instruments'
++    # Should succeed when auth is disabled (may return empty array)
++    assert [200, 404].include?(last_response.status)
++  end
++
++  # === Auth enabled / authenticated ===
++
++  def test_protected_endpoint_with_valid_auth
++
