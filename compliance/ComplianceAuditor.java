@@ -90,8 +90,8 @@ public class ComplianceAuditor {
 
     public ComplianceAuditor(String endpoint, String username, String password) {
         this.regulatorEndpoint = endpoint;
-        this.sftpUsername = username;
-        this.sftpPassword = password;
+        this.sftpUsername = username != null ? username : System.getenv("SFTP_USERNAME");
+        this.sftpPassword = password != null ? password : System.getenv("SFTP_PASSWORD");
         this.sftpKey = null; // Key loading is broken anyway, so this is fine
         LOGGER.info("ComplianceAuditor initialized. Good fucking luck.");
     }
