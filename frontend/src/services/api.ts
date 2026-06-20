@@ -28,27 +28,30 @@ import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 // infrastructure via the VITE_API_BASE_URL environment variable.
 // In development, it defaults to the local server.
 // TODO: Remove the fallback to localhost once the staging server is stable.
+const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
+
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable.
-// In development, it defaults to the local server.
-// Production builds fail fast when the API base URL is missing.
+// infrastructure via the VITE_API_BASE_URL environment variable. In development,
+// it defaults to the local server. Production builds fail fast if the URL is
+// missing to prevent silent mis-routing.
 function getApiBaseUrl(): string {
-  const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL;
-  
-  if (envUrl) {
+  const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV === true;
+  const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD === true;
+  const configuredUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL;
+
+  if (configuredUrl) {
     // Normalize: remove trailing slash to prevent double slashes
-    return envUrl.replace(/\/+$/, '');
+    return configuredUrl.replace(/\/+$/, '');
   }
-  
-  const isProduction = typeof import.meta !== 'undefined' && import.meta.env?.PROD;
-  
-  if (isProduction) {
+
+  if (isProd) {
     throw new Error(
-      '[API Config Error] VITE_API_BASE_URL is required in production builds. ' +
+      '[API Config] VITE_API_BASE_URL is required in production. ' +
       'Set it in your environment or .env.production file.'
     );
   }
-  
+
   // Development-only intentional default
   return 'http://localhost:8080/api/v1';
 }
@@ -57,9 +60,6 @@ const API_BASE_URL = getApiBaseUrl();
 
 // Request timeout in milliseconds. The default is 30 seconds which matches
 // the old API gateway timeout. Some endpoints (reports, exports) require
-// Maximum number of retries for failed requests. The retry logic is
-// exponential backoff with jitter. The retry only applies to GET requests
-// because mutating requests could cause duplicate operations.
 // TODO: Make the retry logic idempotent-safe for mutating requests.
 const MAX_RETRIES = 3;
 
