@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,16 +21,88 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     checkOrigin,
+}
+
+const allowedOriginsEnv = "MARKET_WS_ALLOWED_ORIGINS"
+
+func checkOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+
+	if isLocalhostOrigin(parsed) {
+		return true
+	}
+
+	if r.Host != "" && normalizeHostPort(parsed.Host) == normalizeHostPort(r.Host) {
+		return true
+	}
+
+	_, ok := configuredAllowedOrigins()[normalizeOrigin(parsed)]
+	return ok
+}
+
+func configuredAllowedOrigins() map[string]struct{} {
+	allowed := make(map[string]struct{})
+	for _, value := range strings.FieldsFunc(os.Getenv(allowedOriginsEnv), func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t' || r == ' '
+	}) {
+		origin := strings.TrimSpace(value)
+		if origin == "" {
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+		allowed[normalizeOrigin(parsed)] = struct{}{}
+	}
+	return allowed
+}
+
+func normalizeOrigin(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + normalizeHostPort(u.Host)
+}
+
+func normalizeHostPort(hostport string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostport)), ".")
+}
+
+func isLocalhostOrigin(u *url.URL) bool {
+	host := hostnameOnly(u.Host)
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func hostnameOnly(hostport string) string {
+	host := normalizeHostPort(hostport)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return strings.Trim(parsedHost, "[]")
+	}
+	if strings.HasPrefix(host, "[") {
+		if end := strings.Index(host, "]"); end > 0 {
+			return strings.Trim(host[:end+1], "[]")
+		}
+	}
+	if strings.Count(host, ":") == 1 {
+		return strings.Split(host, ":")[0]
+	}
+	return strings.Trim(host, "[]")
 }
 
 type Client struct {
-	hub      *Hub
-	conn     *websocket.Conn
-	send     chan []byte
-	subs     map[types.Symbol]struct{}
-	remote   string
-	mu       sync.Mutex
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	subs   map[types.Symbol]struct{}
+	remote string
+	mu     sync.Mutex
 }
 
 type Hub struct {
