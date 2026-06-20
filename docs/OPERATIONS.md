@@ -310,3 +310,60 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Legacy Migration Dry-Run & Validation
+
+The legacy database migration tool (`tools/legacy_migration.py`) supports a dry-run mode and a validation command to verify migrations before they are applied.
+
+### Configuration Template
+
+To run a dry-run migration, create a YAML configuration file (e.g., `config.yaml`):
+
+```yaml
+migration_id: "MIG-DRYRUN-MIGRATION"
+migration_type: "data"
+from_version: 1
+to_version: 2
+source_db: "mock://"
+target_db: "mock://"
+batch_size: 1000
+parallel_workers: 4
+validate_checksums: true
+validate_row_counts: true
+validate_schema: true
+create_backup: true
+backup_dir: "./migration_backups"
+```
+
+### Dry-Run Execution
+
+Run the dry-run command using the configuration file:
+
+```bash
+python tools/legacy_migration.py dry-run --config config.yaml --report
+```
+
+If `--report` is provided, a detailed verification report is saved to `dry_run_report.json`.
+
+### Dry-Run Report Specification
+
+The generated report contains:
+- `migration_id`: Unique migration execution identifier.
+- `status`: Execution status (e.g., `completed`, `failed`).
+- `started_at` / `completed_at`: Timestamps of execution phases.
+- `duration_seconds`: Total time taken.
+- `total_records` / `migrated_records` / `failed_records`: Counts of records processed.
+- `dry_run_validation`: Sub-object validating integrity checklist items:
+  - `checksums_match`: True if source and target records have matching sha256 checksums.
+  - `row_counts_match`: True if record counts match post-migration.
+  - `schema_validation_passed`: True if target table matches the version's schema rules.
+  - `simulated_restore_verified`: True if the simulated backup/restore cycle matched 100% with the source database.
+
+### Folder Validation
+
+To validate the integrity of a generated migration directory containing a manifest and data files:
+
+```bash
+python tools/legacy_migration.py validate --data-dir ./migration_backups/migration_MIG-DRYRUN-MIGRATION --checksums
+```
+

@@ -51,7 +51,13 @@ def run_text_process(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[st
         kwargs.setdefault("errors", "replace")
     if kwargs.get("env") is not None:
         kwargs["env"] = subprocess_env(kwargs["env"])
+    if platform.system() == "Windows" and cmd:
+        if cmd[0] == "npm":
+            cmd = ["npm.cmd"] + cmd[1:]
+        elif cmd[0] == "npx":
+            cmd = ["npx.cmd"] + cmd[1:]
     return subprocess.run(cmd, **kwargs)
+
 
 
 configure_text_encoding()
@@ -102,8 +108,16 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
             chunks.append(chunk_path)
             index += 1
 
-    logd_path.unlink()
+    for i in range(5):
+        try:
+            logd_path.unlink()
+            break
+        except PermissionError:
+            time.sleep(0.5)
+    else:
+        logd_path.unlink()
     return chunks
+
 
 
 @dataclass
@@ -540,7 +554,7 @@ def build_diagnostic_report(
 
     decrypt_target = logd_relpaths[0] if logd_relpaths and len(logd_relpaths) == 1 else None
     if logd_relpaths and len(logd_relpaths) > 1:
-        decrypt_target = str((DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT))
+        decrypt_target = (DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT).as_posix()
 
     report = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -589,7 +603,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✗', Colors.RED)} No diagnostic artifacts found to commit")
         return False
 
-    relpaths = [str(path.relative_to(ROOT)) for path in existing]
+    relpaths = [path.relative_to(ROOT).as_posix() for path in existing]
     status = run_text_process(
         ["git", "status", "--porcelain", "--", *relpaths],
         cwd=str(ROOT),
@@ -743,8 +757,8 @@ def generate_logd(
 
         safe_pw = sr.stdout.strip()
         logd_files = split_diagnostic_logd(logd_path)
-        logd_relpaths = [str(path.relative_to(ROOT)) for path in logd_files]
-        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else str(logd_path.relative_to(ROOT))
+        logd_relpaths = [path.relative_to(ROOT).as_posix() for path in logd_files]
+        decrypt_target = logd_relpaths[0] if len(logd_relpaths) == 1 else logd_path.relative_to(ROOT).as_posix()
         write_diagnostic_report(
             metadata_path,
             build_diagnostic_report(
