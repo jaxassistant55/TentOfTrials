@@ -80,7 +80,7 @@ module Constants
   API_PORT             = 8083
   API_HOST             = '0.0.0.0'
   API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
-  API_AUTH_REQUIRED    = false  # TODO: Add auth. It's on the roadmap. Really.
+  API_AUTH_REQUIRED    = ENV.fetch('MARKET_STREAM_AUTH_REQUIRED', 'false').downcase == 'true'
 
   # Market Data
   MAX_TICK_HISTORY     = 10_000  # ticks per instrument. In memory. On the heap.
@@ -249,6 +249,17 @@ class MarketStreamAPI < Sinatra::Base
   set :bind, Constants::API_HOST
   set :server, :puma
   set :show_exceptions, false
+
+  before do
+    if Constants::API_AUTH_REQUIRED
+      return if request.path_info == '/health'
+      auth_header = env['HTTP_AUTHORIZATION'] || env['HTTP_X_API_TOKEN']
+      expected_token = ENV.fetch('MARKET_STREAM_API_TOKEN', 'dev-token')
+      unless auth_header && (auth_header == "Bearer #{expected_token}" || auth_header == expected_token)
+        halt 401, { error: 'Unauthorized', message: 'Missing or invalid authentication token' }.to_json
+      end
+    end
+  end
 
   # Health check  -  returns "OK" unless the service is actively on fire.
   get '/health' do
