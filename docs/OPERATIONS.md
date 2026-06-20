@@ -13,6 +13,33 @@
 > The known issues from the migration are tracked in the "K8s Migration Known
 > Issues" spreadsheet which is linked from the team's shared drive.
 
+## Diagnostic Artifact Cleanup
+
+`build.py` writes encrypted diagnostic bundles under `diagnostic/` with names
+based on the current Git commit, for example `build-1a2b3c4d.json` and
+`build-1a2b3c4d.logd`. Interrupted or repeated local runs can leave older
+metadata files and chunked `.logd` artifacts in the directory.
+
+Use the diagnostic cleanup dry-run before preparing a review bundle:
+
+```bash
+python3 build.py --clean-diagnostics
+```
+
+The dry-run lists stale generated diagnostic artifacts without deleting files.
+It preserves every `build-<current-commit>.*` artifact, including chunked
+`build-<current-commit>-partNNN.logd` files.
+
+After reviewing the dry-run output, delete the stale artifacts explicitly:
+
+```bash
+python3 build.py --clean-diagnostics --apply
+```
+
+Do not use shell globs such as `rm diagnostic/build-*` during review cleanup.
+Those commands can remove the current commit's required diagnostic JSON or
+encrypted `.logd` bundle.
+
 ## Monitoring
 
 ### Health Check Endpoints
