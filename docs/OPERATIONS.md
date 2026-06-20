@@ -76,6 +76,14 @@ connections are closed:
 
 The liveness endpoint remains independent and should continue to report the
 process as alive while the gateway drains in-flight work.
+
+### Frontend WebSocket Lifecycle
+
+Frontend WebSocket hooks must clear pending reconnect timers during unmount.
+Callbacks from an older socket generation are ignored after a newer connection
+has been created, so stale close, error, and message events cannot schedule new
+reconnects or update current hook state.
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
