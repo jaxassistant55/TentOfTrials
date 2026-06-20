@@ -1,13 +1,16 @@
 {
-  "generated_at": "2026-06-20T10:10:03.180976+00:00",
+  "generated_at": "2026-06-20T10:10:18.388955+00:00",
   "commit": "3774a0c8",
-  "diagnostic_logd": null,
+  "diagnostic_logd": [
+    "diagnostic/build-3774a0c8-part001.logd",
+    "diagnostic/build-3774a0c8-part002.logd"
+  ],
   "diagnostic_logd_error": null,
   "message_blocker": null,
-  "chunked": false,
-  "chunk_size_bytes": null,
-  "password": null,
-  "decrypt_command": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "4207ca36eee61a3a013e",
+  "decrypt_command": "encryptly unpack diagnostic/build-3774a0c8.logd <outdir> --password 4207ca36eee61a3a013e",
   "total_modules": 10,
   "passed": 0,
   "failed": 10,
@@ -83,5 +86,5 @@
       "output": "Command not found: [Errno 2] No such file or directory: 'luac'"
     }
   ],
-  "pr_note": "Encrypted diagnostic logd artifact was not created; include this JSON report showing why. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-3774a0c8-part001.logd, diagnostic/build-3774a0c8-part002.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
 }
