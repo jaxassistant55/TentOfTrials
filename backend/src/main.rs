@@ -19,7 +19,7 @@ struct Cli {
     #[arg(long, default_value_t = 10000)]
     max_connections: u32,
 
-    #[arg(short, long, default_value = "/etc/tent/config.toml")]
+    #[arg(long, default_value = "/etc/tent/config.toml")]
     config: String,
 }
 
@@ -60,11 +60,17 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         _ = signal.recv() => {
-            tracing::info!("received SIGTERM, initiating graceful shutdown");
+            tracing::info!(
+                accepting_new_work = false,
+                "received SIGTERM, initiating graceful shutdown"
+            );
             shutdown_metrics.mark_started();
         }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received SIGINT, initiating graceful shutdown");
+            tracing::info!(
+                accepting_new_work = false,
+                "received SIGINT, initiating graceful shutdown"
+            );
             shutdown_metrics.mark_started();
         }
     }
