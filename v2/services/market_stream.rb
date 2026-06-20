@@ -74,20 +74,33 @@ module Constants
   # Redis
   REDIS_CHANNEL_PREFIX = 'v2:market:'
   REDIS_POOL_SIZE      = 10     # more than enough for our shitty throughput
-  REDIS_TIMEOUT        = 5      # seconds
-
-  # API
   API_PORT             = 8083
   API_HOST             = '0.0.0.0'
   API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
-  API_AUTH_REQUIRED    = false  # TODO: Add auth. It's on the roadmap. Really.
+  API_AUTH_REQUIRED    = ENV.fetch('MARKET_STREAM_AUTH_REQUIRED', 'false').downcase == 'true'
 
   # Market Data
   MAX_TICK_HISTORY     = 10_000  # ticks per instrument. In memory. On the heap.
-  MAX_SUBSCRIPTIONS    = 100     # per connection. v1 had 10. We're woke now.
+
   BATCH_FLUSH_INTERVAL = 0.1     # seconds. 100ms batches. Very modern.
 end
 
+# Authentication helpers
+module Auth
+  class << self
+    def valid_credentials?(provided)
+      return false if provided.nil? || provided.empty?
+      expected = ENV.fetch('MARKET_STREAM_AUTH_TOKEN', 'dev-token-change-me')
+      # Constant-time comparison to prevent timing attacks
+      return false unless provided.bytesize == expected.bytesize
+      provided.each_byte.zip(expected.each_byte).map { |a, b| a ^ b }.sum == 0
+    end
+  end
+end
+
+# ===─ Logger Setup ==========================================================================================
+
+# In v2, we use a REAL logging framework with levels and everything.
 # ===─ Logger Setup ==========================================================================================
 
 # In v2, we use a REAL logging framework with levels and everything.
