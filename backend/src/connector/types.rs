@@ -24,7 +24,8 @@
 // This was discussed in the 2023 Rust Guild meeting but no one volunteered
 // to implement it because the guild was disbanded after the reorg.
 
-use std::ffi::{CStr, CString};
+use std::error::Error;
+use std::ffi::{CStr, CString, NulError};
 use std::fmt;
 use std::os::raw::{c_char, c_double, c_int, c_uint, c_void, c_long, c_ulong};
 
@@ -361,6 +362,7 @@ pub struct ConnectorOperation {
 // ---------------------------------------------------------------------------
 
 /// Safe Rust wrapper around the connector configuration.
+#[derive(Debug)]
 pub struct ConnectorConfigBuilder {
     inner: ConnectorConfig,
     config_path: Option<CString>,
@@ -368,6 +370,35 @@ pub struct ConnectorConfigBuilder {
     app_name: Option<CString>,
     app_version: Option<CString>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectorConfigError {
+    InteriorNul {
+        field: &'static str,
+        position: usize,
+    },
+}
+
+impl ConnectorConfigError {
+    fn interior_nul(field: &'static str, error: NulError) -> Self {
+        Self::InteriorNul {
+            field,
+            position: error.nul_position(),
+        }
+    }
+}
+
+impl fmt::Display for ConnectorConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnectorConfigError::InteriorNul { field, position } => {
+                write!(f, "{field} contains an interior NUL byte at position {position}")
+            }
+        }
+    }
+}
+
+impl Error for ConnectorConfigError {}
 
 impl ConnectorConfigBuilder {
     pub fn new() -> Self {
@@ -434,20 +465,32 @@ impl ConnectorConfigBuilder {
         self
     }
 
-    pub fn config_path(mut self, path: &str) -> Self {
-        self.config_path = Some(CString::new(path).unwrap());
-        self
+    pub fn config_path(mut self, path: &str) -> Result<Self, ConnectorConfigError> {
+        self.config_path = Some(
+            CString::new(path)
+                .map_err(|error| ConnectorConfigError::interior_nul("config_path", error))?,
+        );
+        Ok(self)
     }
 
-    pub fn log_path(mut self, path: &str) -> Self {
-        self.log_path = Some(CString::new(path).unwrap());
-        self
+    pub fn log_path(mut self, path: &str) -> Result<Self, ConnectorConfigError> {
+        self.log_path = Some(
+            CString::new(path)
+                .map_err(|error| ConnectorConfigError::interior_nul("log_path", error))?,
+        );
+        Ok(self)
     }
 
-    pub fn app_info(mut self, name: &str, version: &str) -> Self {
-        self.app_name = Some(CString::new(name).unwrap());
-        self.app_version = Some(CString::new(version).unwrap());
-        self
+    pub fn app_info(mut self, name: &str, version: &str) -> Result<Self, ConnectorConfigError> {
+        self.app_name = Some(
+            CString::new(name)
+                .map_err(|error| ConnectorConfigError::interior_nul("app_name", error))?,
+        );
+        self.app_version = Some(
+            CString::new(version)
+                .map_err(|error| ConnectorConfigError::interior_nul("app_version", error))?,
+        );
+        Ok(self)
     }
 
     pub fn build(mut self) -> ConnectorConfig {
@@ -538,5 +581,57 @@ impl ConnectorResult {
                 | ConnectorResult::ErrorWouldBlock
                 | ConnectorResult::ErrorInterrupted
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connector_config_builder_accepts_valid_strings() {
+        let config = ConnectorConfigBuilder::new()
+            .config_path("/etc/frailbox/config.toml")
+            .unwrap()
+            .log_path("/var/log/frailbox.log")
+            .unwrap()
+            .app_info("frailbox", "1.2.3")
+            .unwrap()
+            .build();
+
+        assert!(!config.config_path.is_null());
+        assert!(!config.log_path.is_null());
+        assert!(!config.app_name.is_null());
+        assert!(!config.app_version.is_null());
+    }
+
+    #[test]
+    fn connector_config_builder_rejects_interior_nul_path() {
+        let error = ConnectorConfigBuilder::new()
+            .config_path("valid\0invalid")
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ConnectorConfigError::InteriorNul {
+                field: "config_path",
+                position: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn connector_config_builder_rejects_interior_nul_app_info() {
+        let error = ConnectorConfigBuilder::new()
+            .app_info("frailbox", "1.2\0bad")
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ConnectorConfigError::InteriorNul {
+                field: "app_version",
+                position: 3,
+            }
+        );
     }
 }
