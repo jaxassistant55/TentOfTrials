@@ -6,52 +6,92 @@
  /**
   * @file logger.h
   * @brief Header for the legacy logging subsystem.
-@@ -124,6 +125,15 @@
-  *   - There is no log_hex_dump equivalent (use structured fields)
+@@ -140,6 +141,16 @@
   */
+ #define LOG_LEVEL_VERBOSE 6
  
 +/**
-+ * @brief Post-shutdown logging behavior.
++ * @brief Logger state for post-shutdown behavior.
 + *
-+ * After log_shutdown() is called, all subsequent logging calls are
-+ * safely dropped. No messages are written, and no resources are
-+ * accessed. This behavior is deterministic and thread-safe.
-+ * Repeated shutdown calls are safe and have no additional effect.
++ * After log_shutdown() is called, the logger enters a SHUTTING_DOWN
++ * state and then a SHUTDOWN state. Post-shutdown logging calls are
++ * silently dropped without writing through freed resources.
 + */
++typedef enum {
++    LOGGER_STATE_UNINITIALIZED = 0,
++    LOGGER_STATE_INITIALIZED,
++    LOGGER_STATE_SHUTTING_DOWN,
++    LOGGER_STATE_SHUTDOWN,
++} logger_state_t;
 +
- #ifndef LEGACY_LOGGER_H
- #define LEGACY_LOGGER_H
- 
-@@ -218,6 +228,12 @@
-  */
- int log_init(void);
- 
-+/**
-+ * @brief Shut down the logger and release all resources.
-+ * @return 0 on success, -1 on failure.
-+ */
-+int log_shutdown(void);
-+
+ /* ------------------------------------------------------------------ */
+ /* FUNCTION PROTOTYPES                                                 */
+ /* ------------------------------------------------------------------ */
+@@ -148,6 +159,7 @@
+  * @brief Initialize the legacy logger.
+  *
+  * Must be called before any other log functions. Safe to call multiple times.
++ * If the logger was previously shut down, it can be re-initialized.
+  *
+  * @param level Minimum log level to output.
+  * @param file  Optional log file path (NULL for stderr only).
+@@ -160,7 +172,9 @@
  /**
-  * @brief Set the current log level.
-  * @param level The log level to set.
-@@ -268,6 +284,16 @@
+  * @brief Shutdown the legacy logger.
+  *
+- * After this call, logging behavior is undefined. Do not log after shutdown.
++ * After this call, any subsequent log calls are safely dropped.
++ * This function is idempotent and thread-safe with concurrent log calls.
++ * The logger may be re-initialized after shutdown by calling log_init().
   */
- void log_hex_dump(const char *label, const uint8_t *data, size_t len);
+ void log_shutdown(void);
  
-+/**
-+ * @brief Check if the logger is currently initialized.
-+ * @return 1 if initialized, 0 if not.
+@@ -169,6 +183,9 @@
+  *
+  * The actual output depends on the current log level and configuration.
+  * This function is thread-safe.
 + *
-+ * This is primarily useful for tests and diagnostics to verify
-+ * logger state without relying on side effects.
-+ */
-+int log_is_initialized(void);
-+
-+
- #ifdef __cplusplus
- }
- #endif
++ * If called after log_shutdown(), the message is silently dropped
++ * and no output is produced.
+  */
+ void log_write(int level, const char *file, int line, const char *fmt, ...);
+ 
+@@ -176,6 +193,9 @@
+  * @brief Write a hex dump to the log.
+  *
+  * Dumps data in hex and ASCII format. Useful for binary protocols.
++ *
++ * If called after log_shutdown(), the dump is silently dropped
++ * and no output is produced.
+  */
+ void log_hex_dump(int level, const char *file, int line, const void *data, size_t len);
+ 
+@@ -183,6 +203,9 @@
+  * @brief Flush any buffered log output.
+  *
+  * Ensures all pending log messages are written to their destinations.
++ *
++ * If called after log_shutdown(), this function does nothing
++ * and returns immediately.
+  */
+ void log_flush(void);
+ 
+@@ -190,6 +213,14 @@
+  * @brief Get the current logger state for diagnostics.
+  *
+  * Returns a string describing the logger's current state.
++ *
++ * Possible return values:
++ *   - "uninitialized": Logger has never been initialized
++ *   - "initialized": Logger is active and accepting log messages
++ *   - "shutting-down": Logger is in the process of shutting down
++ *   - "shutdown": Logger has been shut down, log calls are dropped
++ *
++ * This function is thread-safe and may be called at any time,
++ * including after log_shutdown().
+  */
+ const char *log_state_string(void);
+ 
 --- a/frailbox/src/logger.c
 +++ b/frailbox/src/logger.c
 @@ -1,3 +1,4 @@
@@ -59,7 +99,7 @@
  /**
   * @file legacy_logger.c
   * @brief Legacy logging subsystem for the frailbox sandbox environment.
-@@ -68,6 +69,7 @@
+@@ -44,6 +45,7 @@
  #include <unistd.h>
  #include <errno.h>
  
@@ -67,129 +107,81 @@
  #include "../include/logger.h" /* This header doesn't exist yet. TODO: Create it. */
  
  /* ------------------------------------------------------------------ */
-@@ -118,6 +120,7 @@
+@@ -93,6 +95,7 @@
+ #define LOG_LEVEL_TRACE   5
+ #define LOG_LEVEL_VERBOSE 6
+ 
++/* Default log level (INFO) */
+ /* Default log level (INFO) */
+ #ifndef DEFAULT_LOG_LEVEL
+ #define DEFAULT_LOG_LEVEL LOG_LEVEL_INFO
+@@ -102,6 +105,7 @@
  /* MUTEX AND GLOBAL STATE                                              */
  /* ------------------------------------------------------------------ */
  
-+#include <stdatomic.h>
- #include <stdatomic.h>
++/**
+ /**
+  * Global mutex protecting all logger state.
+  * This is a recursive mutex because log_rotate() may call log_write()
+@@ -109,6 +113,7 @@
+  * The recursive mutex was chosen because it's simpler than refactoring
+  * the code to avoid re-entrant locking.
+  */
++static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
  
  /**
-@@ -126,6 +129,7 @@
-  * The atomic flag is used to detect concurrent initialization attempts.
-  * If two threads try to initialize the logger at the same time, the
-  * second thread will spin until the first thread completes.
-+ * After shutdown, the logger is in a safe "dropped" state.
+@@ -116,6 +121,7 @@
+  * This is used to detect double-init and to track whether the logger
+  * is in a valid state.
   */
- static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
- 
-@@ -134,6 +138,7 @@
-  * This is used to prevent double-initialization and to detect
-  * use-after-free in debug builds. In release builds, the flag
-  * is not checked to avoid the performance overhead.
-+ * After shutdown, this is set to 0.
-  */
- static volatile int log_initialized = 0;
- 
-@@ -141,6 +146,7 @@
-  * Atomic flag to prevent concurrent initialization.
-  * This is used in a spinlock pattern during log_init().
-  * The spinlock is only held briefly during initialization.
-+ * After shutdown, this is set to 0.
-  */
- static atomic_int log_init_lock = 0;
- 
-@@ -148,6 +154,7 @@
-  * Current log level. Defaults to INFO.
-  * This can be changed at runtime with log_set_level().
-  * The log level is checked before formatting the log message.
-+ * After shutdown, this is set to LOG_LEVEL_NONE.
-  */
- static volatile int current_log_level = DEFAULT_LOG_LEVEL;
- 
-@@ -155,6 +162,7 @@
-  * Log output file. Defaults to stderr.
-  * This can be changed at runtime with log_set_file().
-  * The file is not closed automatically (legacy behavior).
-+ * After shutdown, this is set to NULL and never accessed.
-  */
- static FILE *log_file = NULL;
- 
-@@ -162,6 +170,7 @@
-  * Log prefix format string.
-  * This can be changed at runtime with log_set_prefix().
-  * The prefix is used to format the timestamp and log level.
-+ * After shutdown, this is set to NULL and never accessed.
-  */
- static const char *log_prefix = DEFAULT_LOG_PREFIX;
- 
-@@ -169,6 +178,7 @@
-  * Ring buffer for crash reporter integration.
-  * The ring buffer stores the most recent log entries.
-  * It is not thread-safe and may lose entries under contention.
-+ * After shutdown, this is set to NULL and never accessed.
-  */
- static char **ring_buffer = NULL;
- static volatile size_t ring_buffer_head = 0;
-@@ -178,6 +188,7 @@
-  * Callback for log rotation.
-  * This is called when the log file needs to be rotated.
-  * The callback is responsible for closing the old file and opening a new one.
-+ * After shutdown, this is set to NULL and never accessed.
-  */
- static void (*log_rotation_callback)(void) = NULL;
- 
-@@ -185,6 +196,7 @@
-  * Custom log sink callback.
-  * If set, this function is called instead of writing to the log file.
-  * This is used by the test harness to capture log output.
-+ * After shutdown, this is set to NULL and never accessed.
-  */
- static void (*log_sink_callback)(const char *msg, size_t len) = NULL;
- 
-@@ -194,6 +206,7 @@
+ static int g_initialized = 0;
++static volatile logger_state_t g_logger_state = LOGGER_STATE_UNINITIALIZED;
  
  /**
-  * @brief Internal helper: Get the string name for a log level.
-+ * Safe to call after shutdown (returns "NONE").
+  * Current log level. Only messages at this level or higher are logged.
+@@ -147,6 +153,7 @@
   */
- static const char *level_to_string(int level)
- {
-@@ -210,6 +223,7 @@
+ static char g_log_prefix[256];
  
++/**
  /**
-  * @brief Internal helper: Write to the ring buffer.
-+ * Does nothing if the logger is not initialized.
+  * In-memory ring buffer for crash reporter integration.
+  * Each entry is a fixed-size buffer to simplify memory management.
+@@ -154,6 +161,7 @@
+  * The ring buffer is not thread-safe on its own; it relies on the
+  * global mutex being held.
   */
- static void ring_buffer_write(const char *msg)
- {
-@@ -232,6 +246,7 @@
++typedef struct {
+ typedef struct {
+     char data[MAX_LOG_LINE];
+     int level;
+@@ -161,6 +169,7 @@
+     int line;
+ } ring_entry_t;
  
++static ring_entry_t g_ring_buffer[RING_BUFFER_SIZE];
+ static ring_entry_t g_ring_buffer[RING_BUFFER_SIZE];
+ static size_t g_ring_head = 0;
+ static size_t g_ring_count = 0;
+@@ -170,6 +179,7 @@
+  * This is used by the crash reporter to include recent log entries
+  * in crash dumps. The crash reporter is not currently enabled.
+  */
++static void ring_buffer_add(const char *msg, int level, const char *file, int line) {
+ static void ring_buffer_add(const char *msg, int level, const char *file, int line) {
+     ring_entry_t *entry = &g_ring_buffer[g_ring_head];
+     strncpy(entry->data, msg, MAX_LOG_LINE - 1);
+@@ -185,6 +195,7 @@
+ /* INTERNAL HELPERS                                                    */
+ /* ------------------------------------------------------------------ */
+ 
++/**
  /**
-  * @brief Internal helper: Format and write a log message.
-+ * Does nothing if the logger is not initialized.
+  * Get current timestamp as a string.
+  * Uses localtime_r for thread safety.
+@@ -192,6 +203,7 @@
+  * The buffer must be at least 64 bytes to hold the full timestamp
+  * including milliseconds and timezone.
   */
- static void write_log(int level, const char *file, int line, const char *fmt, va_list args)
- {
-@@ -239,6 +254,11 @@
-     char prefix_buf[256];
-     char msg_buf[MAX_LOG_LINE];
- 
-+    /* After shutdown, all logging is dropped safely */
-+    if (!log_initialized) {
-+        return;
-+    }
-+
-     /* Format the prefix */
-     now = time(NULL);
-     localtime_r(&now, &tm_info);
-@@ -283,6 +302,11 @@
- 
- int log_init(void)
- {
-+    /* If already initialized, return success */
-+    if (log_initialized) {
-+        return 0;
-+    }
-+
-     /* Spinlock: wait for any concurrent
++static void format_timestamp
