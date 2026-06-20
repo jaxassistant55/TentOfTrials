@@ -60,44 +60,48 @@ public class ComplianceAuditor {
 
     private final String regulatorEndpoint;
     private final SftpCredentialProvider sftpCredentialProvider;
+    private final ComplianceOverrideLoader overrideLoader;
+    private ComplianceOverrideLoadResult overrideLoadResult;
     private final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
 
-    // Static initializer that downloads shit from S3 every class load.
-    // Why? Fuck if I know. But it breaks if S3 is unreachable, which means
-    // deployments fail if the CI runner doesn't have S3 access. Ask the
-    // DevOps team how many hours they've spent debugging this.
-    static {
-        try {
-            // TODO: Remove this shit. It was added for a demo in 2022
-            // and nobody removed it because the demo was a success and
-            // everyone forgot about the hack.
-            URL configUrl = new URL("https://s3-eu-west-1.amazonaws.com/internal.config/tot/compliance-overrides.json");
-            HttpURLConnection conn = (HttpURLConnection) configUrl.openConnection();
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            InputStream is = conn.getInputStream();
-            byte[] buffer = new byte[8192];
-            while (is.read(buffer) != -1) { /* just consuming the fucking stream */ }
-            is.close();
-        } catch (Exception e) {
-            // If S3 is down, we just cross our fucking fingers and hope for the best.
-            // The compliance team has been notified. They didn't respond.
-            System.err.println("[WARN] Failed to load compliance overrides from S3: " + e.getMessage());
-            System.err.println("[WARN] Continuing with default configuration. Good fucking luck.");
-        }
+    public ComplianceAuditor(String endpoint, String username, String password) {
+        this(endpoint, SftpCredentialSource.explicit(username, password, null, true), ComplianceOverrideLoader.disabled());
     }
 
-    public ComplianceAuditor(String endpoint, String username, String password) {
-        this(endpoint, SftpCredentialSource.explicit(username, password, null, true));
+    public ComplianceAuditor(
+        String endpoint,
+        String username,
+        String password,
+        ComplianceOverrideLoader overrideLoader
+    ) {
+        this(endpoint, SftpCredentialSource.explicit(username, password, null, true), overrideLoader);
     }
 
     public ComplianceAuditor(String endpoint, SftpCredentialSource credentialSource) {
-        this(endpoint, credentialSource::load);
+        this(endpoint, credentialSource::load, ComplianceOverrideLoader.disabled());
+    }
+
+    public ComplianceAuditor(
+        String endpoint,
+        SftpCredentialSource credentialSource,
+        ComplianceOverrideLoader overrideLoader
+    ) {
+        this(endpoint, credentialSource::load, overrideLoader);
     }
 
     public ComplianceAuditor(String endpoint, SftpCredentialProvider credentialProvider) {
+        this(endpoint, credentialProvider, ComplianceOverrideLoader.disabled());
+    }
+
+    public ComplianceAuditor(
+        String endpoint,
+        SftpCredentialProvider credentialProvider,
+        ComplianceOverrideLoader overrideLoader
+    ) {
         this.regulatorEndpoint = requirePresent(endpoint, "REGULATOR_ENDPOINT", "Regulator endpoint is required");
         this.sftpCredentialProvider = Objects.requireNonNull(credentialProvider, "credentialProvider");
+        this.overrideLoader = Objects.requireNonNull(overrideLoader, "overrideLoader");
+        this.overrideLoadResult = ComplianceOverrideLoadResult.disabled();
         LOGGER.info("ComplianceAuditor initialized with deferred SFTP credential loading.");
     }
 
@@ -105,8 +109,58 @@ public class ComplianceAuditor {
         return new ComplianceAuditor(endpoint, SftpCredentialSource.fromEnvironment(System.getenv()));
     }
 
+    public static ComplianceAuditor fromEnvironment(String endpoint, ComplianceOverrideLoader overrideLoader) {
+        return new ComplianceAuditor(endpoint, SftpCredentialSource.fromEnvironment(System.getenv()), overrideLoader);
+    }
+
     public SftpCredentials validateRegulatorCredentials() {
         return sftpCredentialProvider.load();
+    }
+
+    public static ComplianceOverrideLoader s3OverrideLoader(URL configUrl, Duration timeout) {
+        return new HttpComplianceOverrideLoader(configUrl, timeout);
+    }
+
+    public static ComplianceOverrideLoader defaultS3OverrideLoader() {
+        try {
+            return s3OverrideLoader(
+                new URL("https://s3-eu-west-1.amazonaws.com/internal.config/tot/compliance-overrides.json"),
+                Duration.ofSeconds(5)
+            );
+        } catch (Exception e) {
+            return () -> ComplianceOverrideLoadResult.failure(
+                "COMPLIANCE_OVERRIDE_URL_INVALID",
+                sanitizeDiagnosticMessage(e)
+            );
+        }
+    }
+
+    public ComplianceOverrideLoadResult loadComplianceOverrides() {
+        try {
+            overrideLoadResult = Objects.requireNonNull(
+                overrideLoader.load(),
+                "overrideLoader returned null"
+            );
+        } catch (Exception e) {
+            overrideLoadResult = ComplianceOverrideLoadResult.failure(
+                "COMPLIANCE_OVERRIDE_LOADER_FAILED",
+                sanitizeDiagnosticMessage(e)
+            );
+        }
+        return overrideLoadResult;
+    }
+
+    public ComplianceOverrideLoadResult getOverrideLoadResult() {
+        return overrideLoadResult;
+    }
+
+    private static String sanitizeDiagnosticMessage(Exception e) {
+        String type = e.getClass().getSimpleName();
+        String message = e.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return type;
+        }
+        return type + ": " + message.replaceAll("(?i)(password|token|secret)=([^&\\s]+)", "$1=[REDACTED]");
     }
 
     /**
@@ -493,6 +547,110 @@ public class ComplianceAuditor {
 
         public String getSafeMessage() {
             return safeMessage;
+        }
+    }
+
+    public interface ComplianceOverrideLoader {
+        ComplianceOverrideLoadResult load();
+
+        static ComplianceOverrideLoader disabled() {
+            return ComplianceOverrideLoadResult::disabled;
+        }
+    }
+
+    public enum ComplianceOverrideStatus {
+        DISABLED,
+        LOADED,
+        FAILED
+    }
+
+    public static class ComplianceOverrideLoadResult {
+        private final ComplianceOverrideStatus status;
+        private final String code;
+        private final String message;
+        private final int bytesLoaded;
+
+        private ComplianceOverrideLoadResult(
+            ComplianceOverrideStatus status,
+            String code,
+            String message,
+            int bytesLoaded
+        ) {
+            this.status = status;
+            this.code = code;
+            this.message = message;
+            this.bytesLoaded = bytesLoaded;
+        }
+
+        public static ComplianceOverrideLoadResult disabled() {
+            return new ComplianceOverrideLoadResult(
+                ComplianceOverrideStatus.DISABLED,
+                "COMPLIANCE_OVERRIDES_DISABLED",
+                "Compliance override loading is disabled; using deterministic defaults",
+                0
+            );
+        }
+
+        public static ComplianceOverrideLoadResult loaded(int bytesLoaded) {
+            return new ComplianceOverrideLoadResult(
+                ComplianceOverrideStatus.LOADED,
+                "COMPLIANCE_OVERRIDES_LOADED",
+                "Compliance overrides loaded successfully",
+                bytesLoaded
+            );
+        }
+
+        public static ComplianceOverrideLoadResult failure(String code, String message) {
+            return new ComplianceOverrideLoadResult(
+                ComplianceOverrideStatus.FAILED,
+                code,
+                message,
+                0
+            );
+        }
+
+        public ComplianceOverrideStatus getStatus() { return status; }
+        public String getCode() { return code; }
+        public String getMessage() { return message; }
+        public int getBytesLoaded() { return bytesLoaded; }
+    }
+
+    public static class HttpComplianceOverrideLoader implements ComplianceOverrideLoader {
+        private final URL configUrl;
+        private final int timeoutMillis;
+
+        public HttpComplianceOverrideLoader(URL configUrl, Duration timeout) {
+            this.configUrl = Objects.requireNonNull(configUrl, "configUrl");
+            Objects.requireNonNull(timeout, "timeout");
+            long millis = timeout.toMillis();
+            if (millis <= 0 || millis > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("timeout must be between 1ms and Integer.MAX_VALUE ms");
+            }
+            this.timeoutMillis = (int) millis;
+        }
+
+        @Override
+        public ComplianceOverrideLoadResult load() {
+            try {
+                HttpURLConnection conn = (HttpURLConnection) configUrl.openConnection();
+                conn.setConnectTimeout(timeoutMillis);
+                conn.setReadTimeout(timeoutMillis);
+
+                int bytesLoaded = 0;
+                try (InputStream is = conn.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = is.read(buffer)) != -1) {
+                        bytesLoaded += read;
+                    }
+                }
+                return ComplianceOverrideLoadResult.loaded(bytesLoaded);
+            } catch (Exception e) {
+                return ComplianceOverrideLoadResult.failure(
+                    "COMPLIANCE_OVERRIDE_FETCH_FAILED",
+                    sanitizeDiagnosticMessage(e)
+                );
+            }
         }
     }
 
