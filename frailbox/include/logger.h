@@ -1,3 +1,4 @@
+
 /**
  * @file logger.h
  * @brief Header for the legacy logging subsystem.
@@ -131,12 +132,22 @@ extern "C" {
 /**
  * @def LOG_ERROR(...)
  * Log an error message. Includes file and line number.
- * Usage: LOG_ERROR("Failed to open file: %s", filename);
- *
- * NOTE: The __FILE__ macro may include the full path to the source file,
- * which can be very long in CI environments where the source code is
- * checked out in deeply nested directories. Consider using __FILENAME__
- * instead if brevity is important. We don't use __FILENAME__ because
+ */
+#define LOG_LEVEL_DEBUG   4
+
+/**
+ * Log level: Trace. Very detailed messages for tracing execution flow.
+ */
+#define LOG_LEVEL_TRACE   5
+
+/**
+ * Log level: Verbose. Extremely detailed messages.
+ */
+#define LOG_LEVEL_VERBOSE 6
+
+/* ------------------------------------------------------------------ */
+/* LOG LEVEL STRINGS                                                   */
+/* ------------------------------------------------------------------ */
  * it's not standard. We could define it ourselves but we haven't.
  *
  * TODO: Define __FILENAME__ as (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -198,12 +209,22 @@ extern "C" {
  *   LOG_LEVEL        - Log level (none, error, warn, info, debug, trace, verbose)
  *   LOG_FILE         - Path to log file (default: stderr)
  *   LOG_MODULE       - Module name for log prefix
- *   LOG_SOURCE_INFO  - Include source file/line in logs (0 or 1)
- *   LOG_NO_TIMESTAMPS - Disable timestamps (0 or 1)
+ */
+void log_shutdown(void);
+
+/**
+ * @brief Check if the logger has been shut down.
  *
- * Configuration is read ONCE during initialization. Changes to
- * environment variables after initialization are NOT picked up.
- * This is a known limitation. The structured logger doesn't have
+ * After log_shutdown() is called, the logger is considered shut down.
+ * Post-shutdown logging calls are silently dropped.
+ *
+ * @return 1 if the logger is shut down, 0 otherwise.
+ */
+int log_is_shutdown(void);
+
+/**
+ * @brief Set the current log level.
+ *
  * this limitation because it reads config from a file that can be
  * reloaded with SIGHUP. The legacy logger will never get this feature.
  *
@@ -293,12 +314,31 @@ int log_dump_ring_buffer(int fd);
  * Memory allocation: This function allocates memory internally for
  * the formatted output. If allocation fails, an error is logged
  * and no hex dump is produced. The allocation size is proportional
- * to the input length and should not be called with untrusted data
- * sizes without validation.
+ */
+void log_hex_dump(log_level_t level, const uint8_t *data, size_t len, const char *fmt, ...);
+
+/**
+ * @brief Get the number of messages dropped due to post-shutdown logging.
  *
- * TODO: Add a maximum data length parameter to prevent accidental
- * OOM from large hex dumps. The current implementation will try
- * to allocate memory for any given length, which could exhaust
+ * This counter is useful for diagnostics and testing to verify that
+ * post-shutdown logging is properly handled.
+ *
+ * @return The number of dropped messages since logger initialization.
+ */
+uint64_t log_get_dropped_count(void);
+
+/**
+ * @brief Reset the dropped message counter to zero.
+ *
+ * This is primarily useful in tests to get clean measurements.
+ */
+void log_reset_dropped_count(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LEGACY_LOGGER_H */
  * memory if called with a very large length value.
  *
  * @param label Description label for the dump
