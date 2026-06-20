@@ -72,8 +72,6 @@ module Constants
   WS_MAX_RECONNECTS    = nil     # nil = infinite. Because fuck it.
 
   # Redis
-  REDIS_CHANNEL_PREFIX = 'v2:market:'
-  REDIS_POOL_SIZE      = 10     # more than enough for our shitty throughput
   API_PORT             = 8083
   API_HOST             = '0.0.0.0'
   API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
@@ -81,9 +79,12 @@ module Constants
 
   # Market Data
   MAX_TICK_HISTORY     = 10_000  # ticks per instrument. In memory. On the heap.
+  API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
+  API_AUTH_REQUIRED    = false  # TODO: Add auth. It's on the roadmap. Really.
 
-  BATCH_FLUSH_INTERVAL = 0.1     # seconds. 100ms batches. Very modern.
 end
+
+# ===─ Logger Setup ==========================================================================================
 
 # Authentication helpers
 module Auth
@@ -97,6 +98,8 @@ module Auth
     end
   end
 end
+
+class AuthenticationError < StandardError; end
 
 # ===─ Logger Setup ==========================================================================================
 
