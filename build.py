@@ -37,6 +37,33 @@ def current_commit_id() -> str:
     return "00000000"
 
 
+def get_retention_report() -> dict:
+    """Return a diagnostic artifact retention report containing details of current and older artifacts."""
+    commit_id = current_commit_id()
+    current_artifacts = []
+    older_artifacts = []
+    total_count = 0
+    total_bytes = 0
+    if DIAGNOSTIC_DIR.exists() and DIAGNOSTIC_DIR.is_dir():
+        for item in DIAGNOSTIC_DIR.iterdir():
+            if item.is_file():
+                name = item.name
+                if name.startswith("build-"):
+                    size = item.stat().st_size
+                    total_count += 1
+                    total_bytes += size
+                    if commit_id != "00000000" and commit_id in name:
+                        current_artifacts.append(name)
+                    else:
+                        older_artifacts.append(name)
+    return {
+        "current_commit_artifacts": sorted(current_artifacts),
+        "older_artifacts": sorted(older_artifacts),
+        "total_artifact_count": total_count,
+        "total_bytes": total_bytes
+    }
+
+
 def diagnostic_paths_for_commit() -> tuple[Path, Path, str]:
     """Return stable diagnostic artifact paths under diagnostic/ for the current commit."""
     DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -185,7 +212,7 @@ def _normalize_arch(machine: str) -> Optional[str]:
 
 def _normalize_os() -> Optional[str]:
     system = platform.system().lower()
-    if system == "linux":
+    if system in {"linux", "android"}:
         return "linux"
     if system == "darwin":
         return "macos"
@@ -288,22 +315,28 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, 0, f"Command not found: {e}"
 
     if module.name == "engine":
-
         build_type = "Release" if release else "Debug"
-        cfg_result = subprocess.run(
-            ["cmake", "-S", ".", "-B", "build",
-             f"-DCMAKE_BUILD_TYPE={build_type}"],
-            cwd=str(module.dir),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-        if cfg_result.returncode != 0:
-            return False, time.time() - start, (
-                f"CMake configure failed:\n{cfg_result.stderr}")
+        try:
+            cfg_result = subprocess.run(
+                ["cmake", "-S", ".", "-B", "build",
+                 f"-DCMAKE_BUILD_TYPE={build_type}"],
+                cwd=str(module.dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+            if cfg_result.returncode != 0:
+                return False, time.time() - start, (
+                    f"CMake configure failed:\n{cfg_result.stderr}")
+        except subprocess.TimeoutExpired:
+            return False, time.time() - start, "CMake configure TIMEOUT (120s)"
+        except FileNotFoundError as e:
+            return False, 0, f"Command not found: {e}"
         if verbose:
             print(f"       {color('cmake configured', Colors.GRAY)}")
         cmd = ["cmake", "--build", "build"]
@@ -638,8 +671,17 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--retention-report", action="store_true",
+        help="Emit JSON diagnostic retention report and exit",
+    )
 
     args = parser.parse_args()
+
+    if args.retention_report:
+        report = get_retention_report()
+        print(json.dumps(report, indent=2))
+        return 0
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")

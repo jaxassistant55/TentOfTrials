@@ -310,3 +310,28 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Build Diagnostic Retention Report
+
+To inspect the build diagnostic files generated during local or CI runs:
+
+```bash
+python3 build.py --retention-report
+```
+
+This returns a JSON report outlining the current commit's diagnostic artifacts, older artifacts, the total count, and total size in bytes:
+
+```json
+{
+  "current_commit_artifacts": [
+    "build-abcd1234.logd",
+    "build-abcd1234-metadata.json"
+  ],
+  "older_artifacts": [
+    "build-eeee9999.logd"
+  ],
+  "total_artifact_count": 3,
+  "total_bytes": 45
+}
+```
+
