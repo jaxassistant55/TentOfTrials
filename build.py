@@ -249,6 +249,15 @@ MODULES = [
         env={"CARGO_TERM_COLOR": "always"},
     ),
     Module(
+        name="backend-shutdown-config-tests",
+        language="Rust",
+        dir=ROOT / "backend",
+        build_cmd=["cargo", "test", "shutdown_grace", "--lib"],
+        clean_cmd=["cargo", "clean"],
+        build_dir=None,
+        env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
         name="frontend",
         language="TypeScript",
         dir=ROOT / "frontend",
