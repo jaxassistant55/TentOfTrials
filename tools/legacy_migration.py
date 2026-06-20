@@ -506,6 +506,177 @@ class MigrationEngine:
 
         return self.result
 
+    def _dry_run_restore_validation(self, config_path: str) -> MigrationResult:
+        """
+        Perform a dry-run restore validation without modifying production data.
+
+        Validates:
+        - Backup presence: checks backup directory and manifest exist
+        - Target compatibility: checks schema compatibility
+        - Expected row counts and checksum metadata
+
+        Returns a MigrationResult with validation details.
+        """
+        logger.info("Starting dry-run restore validation")
+        logger.info(f"Config path: {config_path}")
+
+        result = MigrationResult(
+            migration_id=self.config.migration_id,
+            status=MigrationStatus.RUNNING,
+        )
+
+        try:
+            # Load config
+            config = load_json_file(config_path)
+        except Exception as e:
+            result.status = MigrationStatus.FAILED
+            result.errors.append({
+                "phase": "config_load",
+                "error": f"Failed to load config: {e}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            return result
+
+        # ── Validate backup presence ──
+        backup_dir = Path(config.get("backup_dir", DEFAULT_CONFIG["backup_dir"]))
+        result.metadata["backup_dir"] = str(backup_dir)
+
+        if not backup_dir.exists():
+            result.status = MigrationStatus.FAILED
+            result.errors.append({
+                "phase": "backup_check",
+                "error": f"Backup directory does not exist: {backup_dir}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.error(f"Backup directory missing: {backup_dir}")
+            return result
+
+        logger.info(f"Backup directory found: {backup_dir}")
+
+        # Check for backup manifest (scan subdirectories for migration backups)
+        manifest_path = None
+        if (backup_dir / "manifest.json").exists():
+            manifest_path = backup_dir / "manifest.json"
+        else:
+            # Scan subdirectories for migration backup folders
+            for subdir in sorted(backup_dir.iterdir()):
+                if subdir.is_dir() and (subdir / "manifest.json").exists():
+                    manifest_path = subdir / "manifest.json"
+                    result.metadata["backup_subdir"] = str(subdir)
+                    break
+
+        if manifest_path is None:
+            result.status = MigrationStatus.FAILED
+            result.errors.append({
+                "phase": "backup_check",
+                "error": f"Backup manifest not found in {backup_dir} or its subdirectories",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.error(f"Backup manifest missing: {backup_dir}")
+            return result
+
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception as e:
+            result.status = MigrationStatus.FAILED
+            result.errors.append({
+                "phase": "backup_check",
+                "error": f"Failed to read backup manifest: {e}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            return result
+
+        result.metadata["backup_manifest"] = manifest
+        result.metadata["backup_files"] = manifest.get("files", [])
+        logger.info(f"Backup manifest loaded: {manifest.get('migration_id', 'unknown')}")
+
+        # ── Validate target compatibility ──
+        target_schema = config.get("target_schema", {})
+        source_version = manifest.get("from_version", 0)
+        target_version = config.get("to_version", self.config.to_version)
+
+        result.metadata["source_version"] = source_version
+        result.metadata["target_version"] = target_version
+
+        # Check version compatibility
+        if source_version not in SUPPORTED_VERSIONS:
+            result.errors.append({
+                "phase": "schema_check",
+                "error": f"Source version {source_version} is not supported",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            result.warnings.append(f"Source version {source_version} not in supported versions: {SUPPORTED_VERSIONS}")
+
+        if target_version not in SUPPORTED_VERSIONS:
+            result.errors.append({
+                "phase": "schema_check",
+                "error": f"Target version {target_version} is not supported",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            result.warnings.append(f"Target version {target_version} not in supported versions: {SUPPORTED_VERSIONS}")
+
+        if source_version >= target_version:
+            result.errors.append({
+                "phase": "schema_check",
+                "error": f"Source version ({source_version}) must be less than target version ({target_version})",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        # Check schema compatibility
+        if target_schema:
+            required_tables = target_schema.get("tables", [])
+            result.metadata["required_tables"] = len(required_tables)
+            logger.info(f"Target schema requires {len(required_tables)} tables")
+
+            # Check if source backup has matching tables
+            backup_tables = manifest.get("tables", [])
+            missing_tables = [t for t in required_tables if t not in backup_tables]
+            if missing_tables:
+                result.errors.append({
+                    "phase": "schema_check",
+                    "error": f"Missing tables in backup: {missing_tables}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+        else:
+            result.warnings.append("No target schema defined in config; skipping schema compatibility check")
+
+        # Check connection (dry-run: only verify connectivity, do not write)
+        if not self._check_connection(self.config.target_connection):
+            result.errors.append({
+                "phase": "connection_check",
+                "error": "Target connection check failed",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        # ── Compute expected row counts and checksums ──
+        expected_rows = manifest.get("row_count", 0)
+        expected_checksums = manifest.get("checksums", {})
+
+        result.metadata["expected_rows"] = expected_rows
+        result.metadata["expected_checksums"] = expected_checksums
+
+        if expected_rows > 0:
+            result.metadata["row_count"] = expected_rows
+            logger.info(f"Expected row count: {expected_rows}")
+
+        if expected_checksums:
+            result.metadata["checksum_count"] = len(expected_checksums)
+            logger.info(f"Expected checksums: {len(expected_checksums)} tables")
+
+        # ── Determine final status ──
+        if result.errors:
+            result.status = MigrationStatus.FAILED
+            logger.warning(f"Dry-run validation found {len(result.errors)} error(s)")
+        else:
+            result.status = MigrationStatus.COMPLETED
+            logger.info("Dry-run restore validation passed")
+
+        if result.warnings:
+            logger.warning(f"Dry-run validation produced {len(result.warnings)} warning(s)")
+
+        return result
+
     def _finalize(self, status: MigrationStatus) -> MigrationResult:
         """Finalize the migration result with the given status."""
         now = datetime.now(timezone.utc)
@@ -1061,6 +1232,11 @@ Examples:
     dryrun_parser = subparsers.add_parser("dry-run", help="Dry run a migration")
     dryrun_parser.add_argument("--config", type=str, required=True, help="Configuration file")
     dryrun_parser.add_argument("--report", action="store_true", help="Generate detailed report")
+    dryrun_parser.add_argument("--from-version", type=int, help="Source version for validation")
+    dryrun_parser.add_argument("--to-version", type=int, help="Target version for validation")
+    dryrun_parser.add_argument("--source-db", type=str, help="Source database connection string")
+    dryrun_parser.add_argument("--target-db", type=str, help="Target database connection string")
+    dryrun_parser.add_argument("--backup-dir", type=str, help="Backup directory path")
 
     # List command
     list_parser = subparsers.add_parser("list", help="List completed migrations")
@@ -1148,9 +1324,48 @@ def main():
             print("  No migration state found")
 
     elif args.command == "dry-run":
-        print(f"Dry run with config: {args.config}")
-        # TODO: Implement dry run logic
-        print("Dry run complete (no changes made)")
+        config = MigrationConfig(
+            migration_id=f"DRY-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            migration_type=MigrationType.DATA,
+            from_version=args.from_version or 0,
+            to_version=args.to_version or 0,
+            source_connection=args.source_db or "unknown",
+            target_connection=args.target_db or "unknown",
+            dry_run=True,
+            create_backup=False,
+            backup_dir=args.backup_dir,
+        )
+        engine = MigrationEngine(config)
+        result = engine._dry_run_restore_validation(args.config)
+
+        print(f"\n{'='*60}")
+        print(f"  Dry-Run Restore Validation Report")
+        print(f"{'='*60}")
+        print(f"  Status: {result.status.value}")
+        print(f"  Migration ID: {result.migration_id}")
+
+        if result.metadata:
+            print(f"\n  Metadata:")
+            for k, v in result.metadata.items():
+                if isinstance(v, dict):
+                    print(f"    {k}: {json.dumps(v, indent=6)[:200]}")
+                elif isinstance(v, list):
+                    print(f"    {k}: [{len(v)} items]")
+                else:
+                    print(f"    {k}: {v}")
+
+        if result.errors:
+            print(f"\n  Errors ({len(result.errors)}):")
+            for e in result.errors:
+                print(f"    [{e.get('phase', 'unknown')}] {e.get('error', '')}")
+
+        if result.warnings:
+            print(f"\n  Warnings ({len(result.warnings)}):")
+            for w in result.warnings:
+                print(f"    - {w}")
+
+        print(f"\n  Dry run complete (no changes made to production data)")
+        print(f"{'='*60}")
 
     elif args.command == "list":
         print("Listing completed migrations...")

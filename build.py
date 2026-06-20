@@ -228,7 +228,7 @@ def check_encryptly_runs(timeout: int = 60) -> tuple[bool, str]:
     if encryptly_bin is None:
         return False, f"encryptly binary not found ({encryptly_platform_help()})"
 
-    workspace = Path.home() / ".cache" / "tent-of-trials" / "encryptly-preflight"
+    workspace = Path(r"E:\project\bounty_repos\TentOfTrials-jax\_cache") / "encryptly-preflight"
     safe_dir = workspace / "safe"
     logd_path = workspace / "preflight.logd"
     try:
@@ -331,6 +331,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, 0, f"Command not found: {e}"
 
     if module.name == "engine":
 
@@ -623,7 +625,7 @@ def generate_logd(
 
     # Workspace must live under $HOME because encryptly refuses paths outside home.
     home = Path.home()
-    workspace = home / ".cache" / "tent-of-trials" / "logd-workspace"
+    workspace = Path(r"E:\project\bounty_repos\TentOfTrials-jax\_cache") / "logd-workspace"
     safe_dir = workspace / "safe"
 
     try:
