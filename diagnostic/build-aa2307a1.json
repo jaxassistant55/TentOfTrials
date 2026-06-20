@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-06-20T05:38:23.124870+00:00",
+  "commit": "aa2307a1",
+  "diagnostic_logd": [
+    "diagnostic\\build-aa2307a1-part001.logd",
+    "diagnostic\\build-aa2307a1-part002.logd",
+    "diagnostic\\build-aa2307a1-part003.logd",
+    "diagnostic\\build-aa2307a1-part004.logd",
+    "diagnostic\\build-aa2307a1-part005.logd",
+    "diagnostic\\build-aa2307a1-part006.logd",
+    "diagnostic\\build-aa2307a1-part007.logd",
+    "diagnostic\\build-aa2307a1-part008.logd",
+    "diagnostic\\build-aa2307a1-part009.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "9bd74afce5103b2fd275",
+  "decrypt_command": "encryptly unpack diagnostic\\build-aa2307a1.logd <outdir> --password 9bd74afce5103b2fd275",
+  "total_modules": 1,
+  "passed": 0,
+  "failed": 1,
+  "modules": [
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [WinError 2] The system cannot find the file specified"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic\\build-aa2307a1-part001.logd, diagnostic\\build-aa2307a1-part002.logd, diagnostic\\build-aa2307a1-part003.logd, diagnostic\\build-aa2307a1-part004.logd, diagnostic\\build-aa2307a1-part005.logd, diagnostic\\build-aa2307a1-part006.logd, diagnostic\\build-aa2307a1-part007.logd, diagnostic\\build-aa2307a1-part008.logd, diagnostic\\build-aa2307a1-part009.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
