@@ -147,6 +147,25 @@ that no tables are missing. The row count check was added after an incident
 where a backup was taken while a migration was running, resulting in an
 incomplete backup that restored without error but was missing 3 tables.
 
+### Backend Shutdown Grace Period
+
+The backend shutdown cleanup is bounded by `TOT_SHUTDOWN_GRACE_SECS`.
+
+If `TOT_SHUTDOWN_GRACE_SECS` is unset or empty, the backend uses a 30-second
+default. Valid configured values are whole seconds from `1` through `300`.
+
+Invalid values are rejected during startup:
+
+- `0`
+- negative values
+- values above `300`
+- non-numeric values
+
+When the backend receives `SIGTERM` or `SIGINT`, it attempts to disconnect the
+broker, withdraw service discovery, and stop the registry within the configured
+grace period. If cleanup exceeds the configured period, startup/shutdown returns
+an error so the supervisor can surface the failed graceful shutdown.
+
 ### Recovery Procedure
 
 1. Identify the recovery point (time or transaction ID)

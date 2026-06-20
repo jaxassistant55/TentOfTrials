@@ -9,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
 struct Cli {
-
     #[arg(short, long, default_value = "node-0")]
     node_id: String,
 
@@ -47,6 +46,7 @@ async fn main() -> Result<()> {
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
+    let shutdown_grace = tent_backend::config::shutdown_grace_duration_from_env()?;
 
     registry.initialize().await?;
     discovery.announce(&cli.node_id).await?;
@@ -54,9 +54,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         _ = signal.recv() => {
@@ -67,9 +65,18 @@ async fn main() -> Result<()> {
         }
     }
 
-    broker.disconnect().await?;
-    discovery.withdraw(&cli.node_id).await?;
-    registry.shutdown().await?;
+    tokio::time::timeout(shutdown_grace, async {
+        broker.disconnect().await?;
+        discovery.withdraw(&cli.node_id).await?;
+        registry.shutdown().await
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "shutdown exceeded {} second grace period",
+            shutdown_grace.as_secs()
+        )
+    })??;
 
     tracing::info!("shutdown complete");
     Ok(())
