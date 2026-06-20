@@ -147,6 +147,22 @@ that no tables are missing. The row count check was added after an incident
 where a backup was taken while a migration was running, resulting in an
 incomplete backup that restored without error but was missing 3 tables.
 
+### Diagnostic Artifact Cleanup
+
+Diagnostic build artifacts are stored under `diagnostic/` as
+`build-<commit>.json`, `build-<commit>.logd`, or split
+`build-<commit>-partNNN.logd` chunks. Interrupted local runs can leave old
+chunks in place, which makes PR review folders difficult to audit.
+
+Run `python3 build.py --cleanup-diagnostics` to list stale diagnostic artifacts
+without deleting files. Dry-run mode is the default and is safe to use before a
+PR.
+
+Run `python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup` only
+after reviewing the dry-run output. The apply flag deletes stale diagnostic
+metadata and log chunks whose commit prefix does not match the current commit.
+Artifacts for the current commit are always preserved.
+
 ### Recovery Procedure
 
 1. Identify the recovery point (time or transaction ID)

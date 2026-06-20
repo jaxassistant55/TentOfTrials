@@ -69,6 +69,110 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
     return chunks
 
 
+@dataclass(frozen=True)
+class DiagnosticCleanupCandidate:
+    path: Path
+    commit_id: str
+    reason: str
+
+
+def _diagnostic_commit_from_artifact(path: Path) -> Optional[str]:
+    name = path.name
+    stem: Optional[str] = None
+
+    if name.endswith("-metadata.json"):
+        stem = name[: -len("-metadata.json")]
+    elif name.endswith(".json"):
+        stem = name[: -len(".json")]
+    elif name.endswith(".logd"):
+        stem = name[: -len(".logd")]
+
+    if stem is None or not stem.startswith("build-"):
+        return None
+
+    token = stem[len("build-") :]
+    if "-part" in token:
+        commit_id, part = token.split("-part", 1)
+        if not part.isdigit():
+            return None
+    else:
+        commit_id = token
+
+    commit_id = commit_id.lower()
+    if len(commit_id) != 8:
+        return None
+    if not all(ch in "0123456789abcdef" for ch in commit_id):
+        return None
+    return commit_id
+
+
+def stale_diagnostic_artifacts(
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+) -> list[DiagnosticCleanupCandidate]:
+    active_commit = (current_commit or current_commit_id()).lower()
+    if not diagnostic_dir.exists():
+        return []
+
+    candidates: list[DiagnosticCleanupCandidate] = []
+    for artifact in sorted(diagnostic_dir.glob("build-*")):
+        if not artifact.is_file():
+            continue
+        artifact_commit = _diagnostic_commit_from_artifact(artifact)
+        if artifact_commit is None or artifact_commit == active_commit:
+            continue
+        candidates.append(
+            DiagnosticCleanupCandidate(
+                path=artifact,
+                commit_id=artifact_commit,
+                reason=f"not current commit {active_commit}",
+            )
+        )
+    return candidates
+
+
+def cleanup_stale_diagnostic_artifacts(
+    *,
+    apply: bool = False,
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+) -> list[DiagnosticCleanupCandidate]:
+    candidates = stale_diagnostic_artifacts(diagnostic_dir, current_commit)
+    if not apply:
+        return candidates
+
+    diagnostic_root = diagnostic_dir.resolve()
+    for candidate in candidates:
+        resolved = candidate.path.resolve()
+        try:
+            resolved.relative_to(diagnostic_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Refusing to delete outside diagnostic dir: {candidate.path}") from exc
+        if candidate.path.exists():
+            candidate.path.unlink()
+    return candidates
+
+
+def print_diagnostic_cleanup_results(
+    candidates: list[DiagnosticCleanupCandidate],
+    *,
+    apply: bool,
+) -> None:
+    mode = "Applied" if apply else "Dry run"
+    if not candidates:
+        print(f"  {color(mode + ': no stale diagnostic artifacts found.', Colors.GREEN)}")
+        return
+
+    action = "Deleted" if apply else "Would delete"
+    print(f"  {color(mode + ': stale diagnostic artifacts', Colors.BOLD)}")
+    for candidate in candidates:
+        try:
+            display_path = candidate.path.relative_to(ROOT)
+        except ValueError:
+            display_path = candidate.path
+        print(f"    {color(action, Colors.YELLOW)} {display_path} ({candidate.reason})")
+
+
 @dataclass
 class Module:
     name: str
@@ -195,6 +299,14 @@ MODULES = [
         language="Python",
         dir=ROOT / "tools",
         build_cmd=["python3", "test_legacy_migration_dry_run.py"],
+        clean_cmd=["echo", "Python has no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="diagnostic-cleanup",
+        language="Python",
+        dir=ROOT / "tools",
+        build_cmd=["python3", "test_diagnostic_cleanup.py"],
         clean_cmd=["echo", "Python has no build artifacts to clean"],
         build_dir=None,
     ),
@@ -368,6 +480,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
@@ -824,6 +938,10 @@ Examples:
   python3 build.py --clean            Clean all artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
+  python3 build.py --cleanup-diagnostics
+                                      Dry-run stale diagnostic cleanup
+  python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup
+                                      Delete stale diagnostic artifacts
 
 Diagnostic bundle:
   python3 build.py
@@ -850,12 +968,27 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--cleanup-diagnostics", action="store_true",
+        help="List stale diagnostic artifacts without deleting them",
+    )
+    parser.add_argument(
+        "--apply-diagnostic-cleanup", action="store_true",
+        help="Delete stale diagnostic artifacts found by --cleanup-diagnostics",
+    )
 
     args = parser.parse_args()
+    if args.apply_diagnostic_cleanup and not args.cleanup_diagnostics:
+        parser.error("--apply-diagnostic-cleanup requires --cleanup-diagnostics")
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
+
+    if args.cleanup_diagnostics:
+        candidates = cleanup_stale_diagnostic_artifacts(apply=args.apply_diagnostic_cleanup)
+        print_diagnostic_cleanup_results(candidates, apply=args.apply_diagnostic_cleanup)
+        return 0
 
     if args.list:
         print(f"  {color('Available modules:', Colors.BOLD)}")
