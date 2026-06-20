@@ -9,12 +9,12 @@
  * - SSO (SAML, OpenID Connect)
  * - API key authentication for machine-to-machine
  *
- * TODO: The token refresh logic has a race condition when multiple tabs
- * try to refresh simultaneously. The fix involves a shared worker or
- * broadcast channel coordination.
+ * Token refreshes use a single-flight guard so concurrent callers share the
+ * same refresh request and state transition.
  */
 
 import { get, post, del } from './api';
+import { createRefreshSingleFlight } from './authRefreshSingleFlight';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -218,6 +218,28 @@ function scheduleTokenRefresh(tokens: AuthTokens): void {
   }, refreshIn);
 }
 
+const refreshOnce = createRefreshSingleFlight<AuthTokens>({
+  loadRefreshToken: () => {
+    const tokens = currentTokens || loadStoredTokens();
+    return tokens?.refreshToken ?? null;
+  },
+  performRefresh: async (refreshToken) => {
+    const response = await post<{ tokens: AuthTokens }>('/auth/refresh', {
+      refreshToken,
+    });
+    return response.data.tokens;
+  },
+  applySuccess: (tokens) => {
+    storeTokens(tokens);
+    scheduleTokenRefresh(tokens);
+  },
+  applyFailure: () => {
+    clearStoredTokens();
+    currentUser = null;
+    notifyListeners(null);
+  },
+});
+
 // ---------------------------------------------------------------------------
 // PUBLIC API
 // ---------------------------------------------------------------------------
@@ -277,24 +299,7 @@ export async function logout(): Promise<void> {
 }
 
 export async function refreshTokens(): Promise<AuthTokens | null> {
-  const tokens = currentTokens || loadStoredTokens();
-  if (!tokens?.refreshToken) return null;
-
-  try {
-    const response = await post<{ tokens: AuthTokens }>('/auth/refresh', {
-      refreshToken: tokens.refreshToken,
-    });
-
-    storeTokens(response.data.tokens);
-    scheduleTokenRefresh(response.data.tokens);
-
-    return response.data.tokens;
-  } catch {
-    clearStoredTokens();
-    currentUser = null;
-    notifyListeners(null);
-    return null;
-  }
+  return refreshOnce();
 }
 
 export async function getCurrentUser(): Promise<User | null> {
