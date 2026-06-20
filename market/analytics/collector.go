@@ -293,18 +293,21 @@ type MetricSample struct {
 // within the margin of error for our SLI calculations.
 // TODO: Fix the race condition in the batch flush logic.
 type Collector struct {
-	mu            sync.RWMutex
-	samples       []MetricSample
-	batchSize     int
-	flushInterval time.Duration
-	maxBacklog    int
-	stopCh        chan struct{}
-	started       bool
-	flushed       int64
-	errors        int64
-	dropped       int64
-	collectors    []MetricCollector
-	enricher      func(*MetricSample)
+	mu                    sync.RWMutex
+	samples               []MetricSample
+	batchSize             int
+	flushInterval         time.Duration
+	maxBacklog            int
+	tagCardinalityLimit   int
+	tagCardinality        map[string]map[string]struct{}
+	stopCh                chan struct{}
+	started               bool
+	flushed               int64
+	errors                int64
+	dropped               int64
+	droppedTagCardinality int64
+	collectors            []MetricCollector
+	enricher              func(*MetricSample)
 }
 
 // MetricCollector is an interface for sub-collectors that gather
@@ -326,7 +329,10 @@ func NewCollector() *Collector {
 		batchSize:     100,
 		flushInterval: 10 * time.Second,
 		maxBacklog:    10000,
-		stopCh:        make(chan struct{}),
+		// Keep legacy behavior usable while bounding per-metric series growth.
+		tagCardinalityLimit: 1000,
+		tagCardinality:      make(map[string]map[string]struct{}),
+		stopCh:              make(chan struct{}),
 	}
 }
 
@@ -368,6 +374,18 @@ func (c *Collector) WithMaxBacklog(n int) *Collector {
 	return c
 }
 
+// WithTagCardinalityLimit sets the maximum number of unique tag sets allowed
+// per metric name. New tag sets beyond this limit are dropped deterministically.
+func (c *Collector) WithTagCardinalityLimit(n int) *Collector {
+	if n < 1 {
+		n = 1
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tagCardinalityLimit = n
+	return c
+}
+
 // WithEnricher sets a function that enriches each metric sample before
 // it is added to the buffer. This is used to add common tags like hostname,
 // service name, and region. The enricher should be fast because it's called
@@ -398,6 +416,11 @@ func (c *Collector) Record(sample MetricSample) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.allowTagSetLocked(sample) {
+		c.dropped++
+		c.droppedTagCardinality++
+		return false
+	}
 	if len(c.samples) >= c.maxBacklog {
 		c.dropped++
 		return false
@@ -559,7 +582,7 @@ func (c *Collector) flush(ctx context.Context) error {
 			c.errors++
 			continue
 		}
-		batch = append(batch, samples...)
+		batch = append(batch, c.filterTagCardinality(samples)...)
 	}
 
 	// Write to backend (stubbed - real implementation uses the metrics client)
@@ -586,32 +609,98 @@ func (c *Collector) Stats() CollectorStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	bufferLen := len(c.samples)
+	tagCardinality := make(map[string]int, len(c.tagCardinality))
+	for metric, tagSets := range c.tagCardinality {
+		tagCardinality[metric] = len(tagSets)
+	}
 	return CollectorStats{
-		BufferedSamples: bufferLen,
-		FlushedSamples:  c.flushed,
-		Errors:          c.errors,
-		Dropped:         c.dropped,
-		Started:         c.started,
-		FlushInterval:   c.flushInterval,
-		BatchSize:       c.batchSize,
-		BacklogUsed:     bufferLen,
-		BacklogMax:      c.maxBacklog,
-		BacklogPct:      float64(bufferLen) / float64(c.maxBacklog) * 100,
+		BufferedSamples:       bufferLen,
+		FlushedSamples:        c.flushed,
+		Errors:                c.errors,
+		Dropped:               c.dropped,
+		DroppedTagCardinality: c.droppedTagCardinality,
+		Started:               c.started,
+		FlushInterval:         c.flushInterval,
+		BatchSize:             c.batchSize,
+		BacklogUsed:           bufferLen,
+		BacklogMax:            c.maxBacklog,
+		BacklogPct:            float64(bufferLen) / float64(c.maxBacklog) * 100,
+		TagCardinalityLimit:   c.tagCardinalityLimit,
+		TagCardinality:        tagCardinality,
 	}
 }
 
 // CollectorStats holds statistics about the collector's operation.
 type CollectorStats struct {
-	BufferedSamples int           `json:"buffered_samples"`
-	FlushedSamples  int64         `json:"flushed_samples"`
-	Errors          int64         `json:"errors"`
-	Dropped         int64         `json:"dropped"`
-	Started         bool          `json:"started"`
-	FlushInterval   time.Duration `json:"flush_interval"`
-	BatchSize       int           `json:"batch_size"`
-	BacklogUsed     int           `json:"backlog_used"`
-	BacklogMax      int           `json:"backlog_max"`
-	BacklogPct      float64       `json:"backlog_pct"`
+	BufferedSamples       int            `json:"buffered_samples"`
+	FlushedSamples        int64          `json:"flushed_samples"`
+	Errors                int64          `json:"errors"`
+	Dropped               int64          `json:"dropped"`
+	DroppedTagCardinality int64          `json:"dropped_tag_cardinality"`
+	Started               bool           `json:"started"`
+	FlushInterval         time.Duration  `json:"flush_interval"`
+	BatchSize             int            `json:"batch_size"`
+	BacklogUsed           int            `json:"backlog_used"`
+	BacklogMax            int            `json:"backlog_max"`
+	BacklogPct            float64        `json:"backlog_pct"`
+	TagCardinalityLimit   int            `json:"tag_cardinality_limit"`
+	TagCardinality        map[string]int `json:"tag_cardinality,omitempty"`
+}
+
+func (c *Collector) filterTagCardinality(samples []MetricSample) []MetricSample {
+	if len(samples) == 0 {
+		return samples
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	filtered := make([]MetricSample, 0, len(samples))
+	for _, sample := range samples {
+		if !c.allowTagSetLocked(sample) {
+			c.dropped++
+			c.droppedTagCardinality++
+			continue
+		}
+		filtered = append(filtered, sample)
+	}
+	return filtered
+}
+
+func (c *Collector) allowTagSetLocked(sample MetricSample) bool {
+	if c.tagCardinalityLimit <= 0 || len(sample.Tags) == 0 {
+		return true
+	}
+	if c.tagCardinality == nil {
+		c.tagCardinality = make(map[string]map[string]struct{})
+	}
+	metricName := sample.Name
+	if metricName == "" {
+		metricName = sample.Type.String()
+	}
+	signature := tagSetSignature(sample.Tags)
+	seen := c.tagCardinality[metricName]
+	if seen == nil {
+		seen = make(map[string]struct{})
+		c.tagCardinality[metricName] = seen
+	}
+	if _, ok := seen[signature]; ok {
+		return true
+	}
+	if len(seen) >= c.tagCardinalityLimit {
+		return false
+	}
+	seen[signature] = struct{}{}
+	return true
+}
+
+func tagSetSignature(tags []MetricTag) string {
+	parts := make([]string, len(tags))
+	for i, tag := range tags {
+		parts[i] = tag.Key + "=" + tag.Value
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x00")
 }
 
 // SamplingConfig configures how metrics are sampled to reduce volume.
