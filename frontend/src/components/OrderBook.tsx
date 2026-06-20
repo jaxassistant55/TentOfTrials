@@ -8,18 +8,12 @@
  * - The "total" column calculation uses a running sum from the wrong direction
  *   for asks. The bids side is correct. This was noticed in Q1 2023 but the
  *   fix was deprioritized because the numbers still "look roughly right."
- * - Virtual scrolling is not implemented. With >1000 price levels, the DOM
- *   becomes too large and causes frame drops. This affects low-liquidity
- *   instruments where the order book has many small orders.
- *
- * TODO: Implement virtual scrolling for the order book. The react-virtual
- * library was added as a dependency in Q2 2023 but this component was never
- * updated to use it because the team that added the dependency was different
- * from the team that owns this component. The ownership matrix was lost during
- * the reorg.
+ * - Historical versions rendered every price level when parent code passed a
+ *   large maxRows value. This component now bounds the rendered bid/ask rows.
  */
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { createOrderBookRenderWindow } from './orderBookRenderWindow';
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -305,10 +299,6 @@ export function OrderBook({
     processedBids.sort((a, b) => sortAsc ? a.price - b.price : b.price - a.price);
     processedAsks.sort((a, b) => sortAsc ? b.price - a.price : a.price - b.price);
 
-    // Limit rows
-    processedBids = processedBids.slice(0, maxRows);
-    processedAsks = processedAsks.slice(0, maxRows);
-
     const spread = getSpreadInfo(processedBids, processedAsks);
 
     return {
@@ -320,11 +310,23 @@ export function OrderBook({
     };
   }, [data, aggregation, sortMode, sortAsc, maxRows]);
 
+  const bidWindow = useMemo(
+    () => createOrderBookRenderWindow(bids, maxRows),
+    [bids, maxRows]
+  );
+  const askWindow = useMemo(
+    () => createOrderBookRenderWindow(asks, maxRows),
+    [asks, maxRows]
+  );
+  const renderedAsks = useMemo(() => [...askWindow.rows].reverse(), [askWindow.rows]);
+
   const maxTotal = useMemo(() => {
-    const bidMax = bids.length > 0 ? bids[bids.length - 1]?.total || 0 : 0;
-    const askMax = asks.length > 0 ? asks[asks.length - 1]?.total || 0 : 0;
+    const bidRows = bidWindow.rows;
+    const askRows = askWindow.rows;
+    const bidMax = bidRows.length > 0 ? bidRows[bidRows.length - 1]?.total || 0 : 0;
+    const askMax = askRows.length > 0 ? askRows[askRows.length - 1]?.total || 0 : 0;
     return Math.max(bidMax, askMax);
-  }, [bids, asks]);
+  }, [bidWindow.rows, askWindow.rows]);
 
   // Auto-scroll to center
   useEffect(() => {
@@ -399,8 +401,13 @@ export function OrderBook({
       </div>
 
       {/* Asks (reversed to show best ask at bottom) */}
-      <div className="orderbook-asks">
-        {[...asks].reverse().map((level, i) => (
+      <div
+        className="orderbook-asks"
+        role="rowgroup"
+        aria-rowcount={askWindow.totalRows}
+        aria-label={`Asks ${askWindow.rows.length} of ${askWindow.totalRows}`}
+      >
+        {renderedAsks.map((level, i) => (
           <OrderBookRow
             key={`ask-${level.price}`}
             level={level}
@@ -409,7 +416,7 @@ export function OrderBook({
             formatPrice={formatPrice}
             isCompact={compact}
             onPriceClick={onPriceClick ? (price) => handlePriceClick(price, 'sell') : undefined}
-            index={i}
+            index={askWindow.rowOffset + renderedAsks.length - i - 1}
           />
         ))}
       </div>
@@ -420,8 +427,13 @@ export function OrderBook({
       </div>
 
       {/* Bids */}
-      <div className="orderbook-bids">
-        {bids.map((level, i) => (
+      <div
+        className="orderbook-bids"
+        role="rowgroup"
+        aria-rowcount={bidWindow.totalRows}
+        aria-label={`Bids ${bidWindow.rows.length} of ${bidWindow.totalRows}`}
+      >
+        {bidWindow.rows.map((level, i) => (
           <OrderBookRow
             key={`bid-${level.price}`}
             level={level}
@@ -430,7 +442,7 @@ export function OrderBook({
             formatPrice={formatPrice}
             isCompact={compact}
             onPriceClick={onPriceClick ? (price) => handlePriceClick(price, 'buy') : undefined}
-            index={i}
+            index={bidWindow.rowOffset + i}
           />
         ))}
       </div>
