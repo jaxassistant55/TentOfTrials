@@ -90,6 +90,15 @@ MODULES = [
         env={"CARGO_TERM_COLOR": "always"},
     ),
     Module(
+        name="backend-shutdown-config-tests",
+        language="Rust",
+        dir=ROOT / "backend",
+        build_cmd=["cargo", "test", "shutdown_grace", "--lib"],
+        clean_cmd=["cargo", "clean"],
+        build_dir=None,
+        env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
         name="frontend",
         language="TypeScript",
         dir=ROOT / "frontend",
@@ -368,6 +377,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
