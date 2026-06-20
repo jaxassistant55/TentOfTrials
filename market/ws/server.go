@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,10 +16,59 @@ import (
 	"go.uber.org/zap"
 )
 
+const envAllowedOrigins = "WS_ALLOWED_ORIGINS"
+
+var defaultLocalhostOrigins = []string{
+	"http://localhost",
+	"https://localhost",
+	"http://127.0.0.1",
+	"https://127.0.0.1",
+	"http://localhost:",
+	"https://localhost:",
+	"http://127.0.0.1:",
+	"https://127.0.0.1:",
+}
+
+func originAllowlistFromEnv() []string {
+	val := os.Getenv(envAllowedOrigins)
+	if val == "" {
+		return defaultLocalhostOrigins
+	}
+	var result []string
+	for _, s := range strings.Split(val, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			result = append(result, s)
+		}
+	}
+	if len(result) == 0 {
+		return defaultLocalhostOrigins
+	}
+	return result
+}
+
+func makeCheckOrigin(allowlist []string) func(r *http.Request) bool {
+	origins := make([]string, len(allowlist))
+	copy(origins, allowlist)
+
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return false
+		}
+		for _, allowed := range origins {
+			if origin == allowed || strings.HasPrefix(origin, allowed) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     makeCheckOrigin(originAllowlistFromEnv()),
 }
 
 type Client struct {
