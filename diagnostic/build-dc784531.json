@@ -1,0 +1,24 @@
+{
+  "generated_at": "2026-06-20T07:00:48.602128+00:00",
+  "commit": "dc784531",
+  "diagnostic_logd": "diagnostic\\build-dc784531.logd",
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "ef4e4fe31aa64e9523d0",
+  "decrypt_command": "encryptly unpack diagnostic\\build-dc784531.logd <outdir> --password ef4e4fe31aa64e9523d0",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "market",
+      "status": "PASS",
+      "elapsed_seconds": 1.611,
+      "artifact": "C:\\Users\\42099\\Documents\\Codex\\2026-06-20\\new-chat\\work\\jaxassistant55-TentOfTrials-ws-pr\\market\\market",
+      "output": ""
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic\\build-dc784531.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
