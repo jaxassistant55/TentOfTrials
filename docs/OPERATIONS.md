@@ -335,3 +335,25 @@ This returns a JSON report outlining the current commit's diagnostic artifacts, 
 }
 ```
 
+## Stale Diagnostic Cleanup
+
+Stale partial `.logd` chunks or older metadata files from interrupted runs can clutter the directory structure. You can scan and delete stale diagnostic artifacts that do not belong to the current commit.
+
+### Scanning for Stale Diagnostics (Dry-run)
+By default, the cleanup command runs in dry-run mode and only lists the stale artifacts without deleting them:
+
+```bash
+python3 build.py --cleanup-stale
+```
+
+### Deleting Stale Diagnostics (Apply)
+To actually delete the stale artifacts, add the `--apply` flag:
+
+```bash
+python3 build.py --cleanup-stale --apply
+```
+
+> [!NOTE]
+> The current commit's diagnostic artifacts (matching the active commit hash) will NEVER be deleted.
+
+

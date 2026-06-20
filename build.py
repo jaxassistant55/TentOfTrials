@@ -64,6 +64,38 @@ def get_retention_report() -> dict:
     }
 
 
+def cleanup_stale_diagnostics(apply: bool = False):
+    """List or delete stale build diagnostic artifacts, preserving current commit's artifacts."""
+    commit_id = current_commit_id()
+    stale_files = []
+    if DIAGNOSTIC_DIR.exists() and DIAGNOSTIC_DIR.is_dir():
+        for item in DIAGNOSTIC_DIR.iterdir():
+            if item.is_file():
+                name = item.name
+                if name.startswith("build-"):
+                    if commit_id != "00000000" and commit_id in name:
+                        continue
+                    stale_files.append(item)
+    if not stale_files:
+        print("No stale diagnostic artifacts found.")
+        return
+    if apply:
+        print("Removing stale diagnostic artifacts:")
+        for path in stale_files:
+            path.unlink()
+            if path.is_relative_to(ROOT):
+                print(f"  Removed: {path.relative_to(ROOT)}")
+            else:
+                print(f"  Removed: diagnostic/{path.name}")
+    else:
+        print("Dry-run: Stale diagnostic artifacts (run with --apply to delete):")
+        for path in stale_files:
+            if path.is_relative_to(ROOT):
+                print(f"  {path.relative_to(ROOT)}")
+            else:
+                print(f"  diagnostic/{path.name}")
+
+
 def diagnostic_paths_for_commit() -> tuple[Path, Path, str]:
     """Return stable diagnostic artifact paths under diagnostic/ for the current commit."""
     DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -675,12 +707,24 @@ Diagnostic bundle:
         "--retention-report", action="store_true",
         help="Emit JSON diagnostic retention report and exit",
     )
+    parser.add_argument(
+        "--cleanup-stale", action="store_true",
+        help="List or delete stale build diagnostic artifacts (defaults to dry-run)",
+    )
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="Actually apply changes (delete files) for --cleanup-stale",
+    )
 
     args = parser.parse_args()
 
     if args.retention_report:
         report = get_retention_report()
         print(json.dumps(report, indent=2))
+        return 0
+
+    if args.cleanup_stale:
+        cleanup_stale_diagnostics(args.apply)
         return 0
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
