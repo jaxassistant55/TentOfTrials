@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,7 +21,117 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     checkOrigin,
+}
+
+// wsAllowedOriginsEnv is a comma-separated list of http(s) origins allowed to
+// open market WebSocket connections.
+const wsAllowedOriginsEnv = "TENT_MARKET_WS_ALLOWED_ORIGINS"
+
+type originPolicy struct {
+	allowed map[string]struct{}
+}
+
+func originPolicyFromEnv() originPolicy {
+	return newOriginPolicy(strings.Split(os.Getenv(wsAllowedOriginsEnv), ","))
+}
+
+func newOriginPolicy(origins []string) originPolicy {
+	policy := originPolicy{allowed: make(map[string]struct{})}
+
+	for _, origin := range origins {
+		normalized, ok := normalizeOrigin(origin)
+		if ok {
+			policy.allowed[normalized] = struct{}{}
+		}
+	}
+
+	return policy
+}
+
+func checkOrigin(r *http.Request) bool {
+	return originPolicyFromEnv().check(r)
+}
+
+func (p originPolicy) check(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+
+	normalized, ok := normalizeOrigin(origin)
+	if !ok {
+		return false
+	}
+
+	if _, ok := p.allowed[normalized]; ok {
+		return true
+	}
+
+	return isLocalDevelopmentOrigin(normalized, r.Host)
+}
+
+func normalizeOrigin(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", false
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", false
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+
+	return scheme + "://" + strings.ToLower(parsed.Host), true
+}
+
+func isLocalDevelopmentOrigin(origin, requestHost string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+
+	return isLoopbackHost(hostnameOnly(parsed.Host)) && isLoopbackHost(hostnameOnly(requestHost))
+}
+
+func hostnameOnly(hostport string) string {
+	hostport = strings.TrimSpace(strings.ToLower(hostport))
+	if hostport == "" {
+		return ""
+	}
+
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	if strings.HasPrefix(hostport, "[") {
+		end := strings.Index(hostport, "]")
+		if end > 0 {
+			return hostport[1:end]
+		}
+	}
+
+	return strings.Trim(hostport, "[]")
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type Client struct {
