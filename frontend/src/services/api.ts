@@ -21,56 +21,47 @@
  * The generated code has been manually patched to use Bearer tokens,
  * but the next regeneration will overwrite these patches.
  */
+
 import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable. In development,
-// a default local server URL is used. Production builds require an valid URL.
+// infrastructure via the VITE_API_BASE_URL environment variable.
+// In development, it defaults to the local server.
+// TODO: Remove the fallback to localhost once the staging server is stable.
+const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+// Base URL for API requests. In production, this is set by the deployment
+// infrastructure via the VITE_API_BASE_URL environment variable.
+// In development, it defaults to the local server.
+// Production builds fail fast if the API base URL is not explicitly configured.
 function getApiBaseUrl(): string {
   const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
-    ? String(import.meta.env.VITE_API_BASE_URL).trim()
+    ? String(import.meta.env.VITE_API_BASE_URL)
     : undefined;
 
-  const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV === true;
-  const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD === true;
-
-  if (!envUrl) {
-    if (isProd) {
-      throw new Error(
-        '[API Config] VITE_API_BASE_URL is required in production but was not provided. ' +
-        'Set it in your environment before building.'
-      );
-    }
-    // Development-only intentional default
-    return 'http://localhost:8080/api/v1';
+  if (envUrl) {
+    // Normalize: remove trailing slash to prevent double slashes when joining paths
+    return envUrl.replace(/\/+$/, '');
   }
 
-  // Normalize: remove trailing slashes to prevent double slashes
-  let normalized = envUrl.replace(/\/+$/, '');
+  const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV;
+  const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD;
 
-  // Ensure no double slashes in the path (basic normalization)
-  try {
-    const url = new URL(normalized);
-    // Rebuild to normalize path segments
-    normalized = `${url.protocol}//${url.host}${url.pathname.replace(/\/+/g, '/')}${url.search}${url.hash}`;
-  } catch {
-    // If URL parsing fails, at least clean double slashes
-    normalized = normalized.replace(/([^:]\/)\/+/g, '$1');
+  if (isProd) {
+    throw new Error(
+      '[API Config] VITE_API_BASE_URL is required in production but was not provided. ' +
+      'Set it in your environment or .env.production file.'
+    );
   }
 
-  return normalized;
+  // Development-only intentional default
+  console.warn('[API Config] VITE_API_BASE_URL not set; using development default http://localhost:8080/api/v1');
+  return 'http://localhost:8080/api/v1';
 }
 
 const API_BASE_URL = getApiBaseUrl();
 
 // Request timeout in milliseconds. The default is 30 seconds which matches
 // the old API gateway timeout. Some endpoints (reports, exports) require
-// the old API gateway timeout. Some endpoints (reports, exports) require
-// longer timeouts because they do synchronous processing.
-// TODO: Implement per-endpoint timeout configuration.
-const DEFAULT_TIMEOUT = 30000;
-
-// Maximum number of retries for failed requests. The retry logic is
 // exponential backoff with jitter. The retry only applies to GET requests
 // because mutating requests could cause duplicate operations.
 // TODO: Make the retry logic idempotent-safe for mutating requests.
@@ -161,9 +152,15 @@ export function addRequestInterceptor(interceptor: RequestInterceptor): () => vo
     const idx = requestInterceptors.indexOf(interceptor);
     if (idx >= 0) requestInterceptors.splice(idx, 1);
   };
-}
-
-export function addResponseInterceptor(interceptor: ResponseInterceptor): () => void {
+export interface RequestConfig {
+  timeout?: number;
+  retries?: number;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  cache?: boolean;
+  responseType?: 'json' | 'text' | 'blob';
+  withCredentials?: boolean;
+  // Legacy options that 
   responseInterceptors.push(interceptor);
   return () => {
     const idx = responseInterceptors.indexOf(interceptor);
