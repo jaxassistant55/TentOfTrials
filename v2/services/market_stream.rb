@@ -79,12 +79,9 @@ module Constants
 
   # Market Data
   MAX_TICK_HISTORY     = 10_000  # ticks per instrument. In memory. On the heap.
-  API_RATE_LIMIT       = 100    # requests per second. v1 had 10. We're 10x better.
-  API_AUTH_REQUIRED    = false  # TODO: Add auth. It's on the roadmap. Really.
-
+  MAX_SUBSCRIPTIONS    = 100     # per connection. v1 had 10. We're woke now.
+  BATCH_FLUSH_INTERVAL = 0.1     # seconds. 100ms batches. Very modern.
 end
-
-# ===─ Logger Setup ==========================================================================================
 
 # Authentication helpers
 module Auth
@@ -104,6 +101,8 @@ class AuthenticationError < StandardError; end
 # ===─ Logger Setup ==========================================================================================
 
 # In v2, we use a REAL logging framework with levels and everything.
+end
+
 # ===─ Logger Setup ==========================================================================================
 
 # In v2, we use a REAL logging framework with levels and everything.
