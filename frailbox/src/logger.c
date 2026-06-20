@@ -1,3 +1,4 @@
+
 /**
  * @file legacy_logger.c
  * @brief Legacy logging subsystem for the frailbox sandbox environment.
@@ -37,12 +38,13 @@
  */
 
 #define _GNU_SOURCE
-#define _DEFAULT_SOURCE
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdarg.h>
-#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+
+#include "../include/logger.h"
+#include "../include/logger.h" /* This header doesn't exist yet. TODO: Create it. */
+
+/* ------------------------------------------------------------------ */
 #include <pthread.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -99,19 +101,23 @@
 #define DEFAULT_LOG_LEVEL LOG_LEVEL_INFO
 #endif
 
-/* ------------------------------------------------------------------ */
-/* MUTEX AND GLOBAL STATE                                              */
-/* ------------------------------------------------------------------ */
-
-/**
- * Global mutex for thread-safe logging. This mutex is a bottleneck
+/* Global state */
+static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_initialized = 0;
+static volatile int g_shutdown = 0;
+static volatile int g_log_level = DEFAULT_LOG_LEVEL;
+static FILE *g_log_file = NULL;
+static char g_log_prefix_format[256] = DEFAULT_LOG_PREFIX;
  * for multi-threaded applications because it serializes all log calls.
- * The structured logger uses a lock-free queue to avoid this bottleneck.
- * TODO: Consider using a per-thread buffer with atomic flush.
- */
-static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_ring_buffer[RING_BUFFER_SIZE][MAX_LOG_LINE];
+static volatile int g_ring_buffer_head = 0;
 
-/**
+/* Post-shutdown drop counter */
+static volatile uint64_t g_dropped_count = 0;
+
+/* ------------------------------------------------------------------ */
+/* INTERNAL HELPERS                                                    */
+/* ------------------------------------------------------------------ */
  * Global log level. Increment this to increase verbosity.
  * Set to LOG_LEVEL_NONE to disable all logging (not recommended).
  * The default log level is read from the LOG_LEVEL environment
@@ -178,12 +184,18 @@ static char g_module_name[64] = "frailbox";
 static pid_t g_pid = 0;
 
 /* ------------------------------------------------------------------ */
-/* INTERNAL HELPERS                                                    */
-/* ------------------------------------------------------------------ */
+        return;
+    }
 
-/**
- * Gets the current time as a struct tm. Thread-safe.
- * Uses localtime_r() which is POSIX.1-2001 compliant.
+    /* If already shut down, re-initialization is not allowed */
+    if (g_shutdown) {
+        fprintf(stderr, "logger: cannot re-initialize after shutdown\n");
+        return;
+    }
+
+    g_log_level = level;
+
+    if (filename) {
  * The fallback is localtime() which is NOT thread-safe.
  * If localtime_r() is not available (Windows), we don't care
  * because this is a Linux-only project.
@@ -207,21 +219,28 @@ static void get_current_time(struct tm *result, struct timeval *tv)
     }
 }
 
-/**
- * Formats the log prefix (timestamp, level, source location).
- * Writes directly into the buffer to avoid extra string copies.
- * Returns the number of bytes written to the buffer.
- *
- * NOTE: The format string is evaluated at compile time because
+void log_shutdown(void) {
+    pthread_mutex_lock(&g_log_mutex);
+
+    /* Idempotent shutdown: safe to call multiple times */
+    g_shutdown = 1;
+
+    if (g_log_file && g_log_file != stderr) {
+        fclose(g_log_file);
+        g_log_file = NULL;
  * g_include_timestamps and g_include_source_info are set during
  * initialization and never change. But we don't use compile-time
  * branching because the optimizer may not inline this function
- * and we don't trust the optimizer. Actually, the optimizer is
- * fine, but this function predates the optimizer trust era.
- */
-static int format_log_prefix(char *buf, size_t buf_size,
-                              const char *level_str,
-                              const char *file, int line)
+    pthread_mutex_unlock(&g_log_mutex);
+}
+
+int log_is_shutdown(void) {
+    return g_shutdown;
+}
+
+void log_set_level(int level) {
+    g_log_level = level;
+}
 {
     int written = 0;
 
@@ -236,12 +255,18 @@ static int format_log_prefix(char *buf, size_t buf_size,
             "%04d-%02d-%02d %02d:%02d:%02d.%03ld",
             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
             t.tm_hour, t.tm_min, t.tm_sec,
-            (long)(tv.tv_usec / 1000));
+    va_list args;
+    int level_value = log_level_from_string(level);
 
-        if (written < 0 || (size_t)written >= buf_size) {
-            return 0;
-        }
-        buf += written;
+    /* Post-shutdown: silently drop the message */
+    if (g_shutdown) {
+        __sync_add_and_fetch(&g_dropped_count, 1);
+        return;
+    }
+
+    if (level_value > g_log_level) {
+        return;
+    }
         buf_size -= (size_t)written;
     }
 
@@ -280,12 +305,18 @@ static int format_log_prefix(char *buf, size_t buf_size,
 
     /* Add source info if enabled */
     if (g_include_source_info && file != NULL) {
-        int n = snprintf(buf, buf_size, " %s:%d:", file, line);
-        if (n < 0 || (size_t)n >= buf_size) {
-            return written;
-        }
-        written += n;
-        buf += n;
+    va_list args;
+    int level_value = log_level_from_string(level);
+
+    /* Post-shutdown: silently drop the message */
+    if (g_shutdown) {
+        __sync_add_and_fetch(&g_dropped_count, 1);
+        return;
+    }
+
+    if (level_value > g_log_level) {
+        return;
+    }
         buf_size -= (size_t)n;
     }
 
@@ -313,12 +344,18 @@ static void ring_buffer_push(const char *message)
     pthread_mutex_lock(&g_ring_buffer.ring_mutex);
 
     strncpy(g_ring_buffer.entries[g_ring_buffer.head], message, MAX_LOG_LINE - 1);
-    g_ring_buffer.entries[g_ring_buffer.head][MAX_LOG_LINE - 1] = '\0';
+void log_hex_dump(log_level_t level, const uint8_t *data, size_t len, const char *fmt, ...) {
+    int level_value = log_level_from_string(level);
 
-    g_ring_buffer.head = (g_ring_buffer.head + 1) % RING_BUFFER_SIZE;
-    if (g_ring_buffer.count < RING_BUFFER_SIZE) {
-        g_ring_buffer.count++;
-    } else {
+    /* Post-shutdown: silently drop the message */
+    if (g_shutdown) {
+        __sync_add_and_fetch(&g_dropped_count, 1);
+        return;
+    }
+
+    if (level_value > g_log_level) {
+        return;
+    }
         g_ring_buffer.tail = (g_ring_buffer.tail + 1) % RING_BUFFER_SIZE;
     }
 
@@ -345,9 +382,17 @@ static void ring_buffer_push(const char *message)
  *
  * TODO: Add LOG_FORMAT environment variable for custom log formats.
  * The request for this feature was submitted in 2020 and is still open.
- *
- * Returns 0 on success, -1 on failure.
- */
+
+    pthread_mutex_unlock(&g_log_mutex);
+}
+
+uint64_t log_get_dropped_count(void) {
+    return g_dropped_count;
+}
+
+void log_reset_dropped_count(void) {
+    g_dropped_count = 0;
+}
 int log_init(void)
 {
     pthread_mutex_lock(&log_mutex);
