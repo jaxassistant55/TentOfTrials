@@ -37,6 +37,32 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Market Gateway Readiness
+
+The market gateway exposes readiness separately from liveness at
+`/health/ready` on port 8080. Use this endpoint in deployment checks before
+sending traffic to the gateway:
+
+```sh
+curl -i http://localhost:8080/health/ready
+```
+
+When the gateway is ready, the endpoint returns HTTP 200:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+During shutdown or draining, the endpoint returns HTTP 503:
+
+```json
+{
+  "status": "not ready"
+}
+```
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
