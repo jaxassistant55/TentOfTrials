@@ -177,12 +177,8 @@ public class ComplianceAuditor {
      */
     public ComplianceResult auditCompliance(String checkType, Map<String, Object> data) {
         try {
-            ComplianceRecord record = new ComplianceRecord(
-                UUID.randomUUID().toString(),
-                checkType,
-                data,
-                Instant.now()
-            );
+            String recordId = UUID.randomUUID().toString();
+            Instant recordTimestamp = Instant.now();
 
             // The actual audit logic is in this switch statement.
             // It's got about 47 cases (there's that number again).
@@ -217,6 +213,13 @@ public class ComplianceAuditor {
                     break;
             }
 
+            ComplianceRecord record = new ComplianceRecord(
+                recordId,
+                checkType,
+                data,
+                recordTimestamp,
+                result
+            );
             auditStore.put(record.getId(), record);
             return result;
 
@@ -238,11 +241,77 @@ public class ComplianceAuditor {
      * it 3 times. Sometimes it fixes itself. We think it's a race condition.
      */
     public byte[] generateReport(LocalDate from, LocalDate to) {
-        // TODO: The PDF generation is FUBAR. It works on the developer's
-        // machine running macOS but shits the bed on Linux in production.
-        // Something about font rendering. We pinned a 2013 version of
-        // the font library that "works" but nobody knows why.
-        return new byte[0]; // Stub: returns empty PDF. Regulators haven't complained yet.
+        if (from == null || to == null) {
+            throw new IllegalArgumentException("Report date range requires from and to dates");
+        }
+        if (to.isBefore(from)) {
+            throw new IllegalArgumentException("Report end date must be on or after start date");
+        }
+
+        Instant startInclusive = from.atStartOfDay(ZoneOffset.UTC).toInstant();
+        Instant endExclusive = to.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        List<ComplianceRecord> records = new ArrayList<>();
+        for (ComplianceRecord record : auditStore.values()) {
+            Instant timestamp = record.getTimestamp();
+            if (!timestamp.isBefore(startInclusive) && timestamp.isBefore(endExclusive)) {
+                records.add(record);
+            }
+        }
+        records.sort(
+            Comparator.comparing(ComplianceRecord::getTimestamp)
+                .thenComparing(ComplianceRecord::getId)
+        );
+
+        StringBuilder report = new StringBuilder();
+        report.append("report_type,compliance_audit\n");
+        report.append("period_from,").append(from).append('\n');
+        report.append("period_to,").append(to).append('\n');
+        report.append("timezone,UTC\n");
+        report.append("record_count,").append(records.size()).append('\n');
+        report.append('\n');
+        report.append("check_id,check_type,timestamp,compliance_status,violations_summary\n");
+
+        for (ComplianceRecord record : records) {
+            ComplianceResult result = record.getResult();
+            String status = result == null
+                ? "UNKNOWN"
+                : (result.isCompliant() ? "COMPLIANT" : "NON_COMPLIANT");
+            report.append(csv(record.getId())).append(',')
+                .append(csv(record.getCheckType())).append(',')
+                .append(csv(dtf.format(record.getTimestamp().atOffset(ZoneOffset.UTC)))).append(',')
+                .append(csv(status)).append(',')
+                .append(csv(violationSummary(result))).append('\n');
+        }
+
+        return report.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static String violationSummary(ComplianceResult result) {
+        if (result == null) {
+            return "No compliance result recorded";
+        }
+        Collection<String> violations = result.getViolations();
+        if (violations != null && !violations.isEmpty()) {
+            return String.join("; ", violations);
+        }
+        if (!isBlank(result.getSummary())) {
+            return result.getSummary();
+        }
+        return result.isCompliant() ? "No violations" : "Non-compliant without violation details";
+    }
+
+    private static String csv(String value) {
+        if (value == null) {
+            return "";
+        }
+        boolean mustQuote = value.indexOf(',') >= 0
+            || value.indexOf('"') >= 0
+            || value.indexOf('\n') >= 0
+            || value.indexOf('\r') >= 0;
+        if (!mustQuote) {
+            return value;
+        }
+        return "\"" + value.replace("\"", "\"\"") + "\"";
     }
 
     /**
@@ -659,18 +728,31 @@ public class ComplianceAuditor {
         private final String checkType;
         private final Map<String, Object> data;
         private final Instant timestamp;
+        private final ComplianceResult result;
 
         public ComplianceRecord(String id, String checkType, Map<String, Object> data, Instant timestamp) {
+            this(id, checkType, data, timestamp, null);
+        }
+
+        public ComplianceRecord(
+            String id,
+            String checkType,
+            Map<String, Object> data,
+            Instant timestamp,
+            ComplianceResult result
+        ) {
             this.id = id;
             this.checkType = checkType;
             this.data = data;
             this.timestamp = timestamp;
+            this.result = result;
         }
 
         public String getId() { return id; }
         public String getCheckType() { return checkType; }
         public Map<String, Object> getData() { return data; }
         public Instant getTimestamp() { return timestamp; }
+        public ComplianceResult getResult() { return result; }
     }
 
     public static class ComplianceResult {
