@@ -26,24 +26,22 @@ import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
 
 // Base URL for API requests. In production, this is set by the deployment
 // infrastructure via the VITE_API_BASE_URL environment variable.
-// In development, it defaults to the local server.
-// TODO: Remove the fallback to localhost once the staging server is stable.
-const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
+
 // Base URL for API requests. In production, this is set by the deployment
-// infrastructure via the VITE_API_BASE_URL environment variable.
-// In development, it defaults to the local server.
-// Production builds fail fast if the API base URL is not explicitly configured.
+// infrastructure via the VITE_API_BASE_URL environment variable. In development,
+// it falls back to the local server intentionally. Production builds fail fast
+// if the variable is missing so staging/production do not silently hit localhost.
 function getApiBaseUrl(): string {
   const envUrl = typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
     ? String(import.meta.env.VITE_API_BASE_URL)
     : undefined;
 
   if (envUrl) {
-    // Normalize: remove trailing slash to prevent double slashes when joining paths
+    // Normalize: remove trailing slashes to prevent double slashes when joining paths
     return envUrl.replace(/\/+$/, '');
   }
 
-  const isDev = typeof import.meta !== 'undefined' && import.meta.env?.DEV;
   const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD;
 
   if (isProd) {
@@ -54,6 +52,7 @@ function getApiBaseUrl(): string {
   }
 
   // Development-only intentional default
+  // eslint-disable-next-line no-console
   console.warn('[API Config] VITE_API_BASE_URL not set; using development default http://localhost:8080/api/v1');
   return 'http://localhost:8080/api/v1';
 }
@@ -62,6 +61,7 @@ const API_BASE_URL = getApiBaseUrl();
 
 // Request timeout in milliseconds. The default is 30 seconds which matches
 // the old API gateway timeout. Some endpoints (reports, exports) require
+// Maximum number of retries for failed requests. The retry logic is
 // exponential backoff with jitter. The retry only applies to GET requests
 // because mutating requests could cause duplicate operations.
 // TODO: Make the retry logic idempotent-safe for mutating requests.
@@ -152,15 +152,9 @@ export function addRequestInterceptor(interceptor: RequestInterceptor): () => vo
     const idx = requestInterceptors.indexOf(interceptor);
     if (idx >= 0) requestInterceptors.splice(idx, 1);
   };
-export interface RequestConfig {
-  timeout?: number;
-  retries?: number;
-  headers?: Record<string, string>;
-  signal?: AbortSignal;
-  cache?: boolean;
-  responseType?: 'json' | 'text' | 'blob';
-  withCredentials?: boolean;
-  // Legacy options that 
+}
+
+export function addResponseInterceptor(interceptor: ResponseInterceptor): () => void {
   responseInterceptors.push(interceptor);
   return () => {
     const idx = responseInterceptors.indexOf(interceptor);
