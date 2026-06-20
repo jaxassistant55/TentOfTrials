@@ -3,13 +3,13 @@ use clap::Parser;
 use tent_backend::discovery::ServiceDiscovery;
 use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
+use tent_backend::shutdown::{ShutdownMetrics, DEFAULT_SHUTDOWN_GRACE_PERIOD};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
 struct Cli {
-
     #[arg(short, long, default_value = "node-0")]
     node_id: String,
 
@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
+    let mut shutdown_metrics = ShutdownMetrics::new(DEFAULT_SHUTDOWN_GRACE_PERIOD);
 
     registry.initialize().await?;
     discovery.announce(&cli.node_id).await?;
@@ -54,22 +55,41 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         _ = signal.recv() => {
             tracing::info!("received SIGTERM, initiating graceful shutdown");
+            shutdown_metrics.mark_started();
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("received SIGINT, initiating graceful shutdown");
+            shutdown_metrics.mark_started();
         }
     }
+
+    let snapshot = shutdown_metrics.snapshot();
+    tracing::info!(
+        shutdown_started = snapshot.shutdown_started,
+        grace_period_seconds = snapshot.grace_period_seconds,
+        elapsed_seconds = snapshot.elapsed_seconds,
+        terminal_status = snapshot.terminal_status.as_str(),
+        "shutdown metrics snapshot"
+    );
 
     broker.disconnect().await?;
     discovery.withdraw(&cli.node_id).await?;
     registry.shutdown().await?;
+
+    shutdown_metrics.mark_completed();
+    let snapshot = shutdown_metrics.snapshot();
+    tracing::info!(
+        shutdown_started = snapshot.shutdown_started,
+        grace_period_seconds = snapshot.grace_period_seconds,
+        elapsed_seconds = snapshot.elapsed_seconds,
+        terminal_status = snapshot.terminal_status.as_str(),
+        "shutdown metrics snapshot"
+    );
 
     tracing::info!("shutdown complete");
     Ok(())

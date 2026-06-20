@@ -58,6 +58,25 @@ Key metrics to monitor:
 | `goroutine_count` | Gauge | Go routine count | > 5000 | > 10000 |
 | `gc_pause_time_ms` | Histogram | GC pause time | > 100ms | > 500ms |
 
+### Backend Shutdown Metrics Snapshot
+
+The Rust backend records a structured shutdown snapshot when graceful shutdown
+starts and again after cleanup completes. The snapshot is internal status
+telemetry only; it does not include request bodies, credentials, tokens, or
+operator-provided payloads.
+
+| Field | Description |
+|-------|-------------|
+| `shutdown_started` | `true` once the backend has received SIGINT or SIGTERM and entered graceful shutdown. |
+| `grace_period_seconds` | The configured grace window reported in whole seconds. |
+| `elapsed_seconds` | Whole seconds elapsed since shutdown began, or the completed/timeout elapsed duration for terminal states. |
+| `terminal_status` | `not_started`, `draining`, `completed`, or `timed_out`. |
+
+Before shutdown begins, the helper reports `shutdown_started: false`,
+`elapsed_seconds: 0`, and `terminal_status: not_started`. During the drain it
+reports `terminal_status: draining`; once cleanup finishes it reports
+`completed`, and if the grace window is exhausted it reports `timed_out`.
+
 ### Grafana Dashboards
 
 Pre-built Grafana dashboards are available:
