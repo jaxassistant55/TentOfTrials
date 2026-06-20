@@ -183,12 +183,17 @@ pub struct RegexValidator {
 
 impl FieldValidator<String> for RegexValidator {
     fn validate(&self, value: &String, field_name: &str) -> ValidationResult {
-        let re = regex::Regex::new(self.pattern).unwrap();
-        if re.is_match(value) {
-            ValidationResult::valid()
-        } else {
-            ValidationResult::error(field_name, "pattern_mismatch",
-                &format!("Does not match required pattern: {}", self.pattern))
+        match regex::Regex::new(self.pattern) {
+            Ok(re) => {
+                if re.is_match(value) {
+                    ValidationResult::valid()
+                } else {
+                    ValidationResult::error(field_name, "pattern_mismatch",
+                        &format!("Does not match required pattern: {}", self.pattern))
+                }
+            }
+            Err(e) => ValidationResult::error(field_name, "invalid_pattern",
+                &format!("Internal error: invalid regex pattern: {}", e)),
         }
     }
 }
@@ -212,13 +217,16 @@ pub struct EmailValidator;
 
 impl FieldValidator<String> for EmailValidator {
     fn validate(&self, value: &String, field_name: &str) -> ValidationResult {
-        let email_regex = regex::Regex::new(
-            r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        ).unwrap();
-        if email_regex.is_match(value) {
-            ValidationResult::valid()
-        } else {
-            ValidationResult::error(field_name, "invalid_email", "Invalid email format")
+        match regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$") {
+            Ok(email_regex) => {
+                if email_regex.is_match(value) {
+                    ValidationResult::valid()
+                } else {
+                    ValidationResult::error(field_name, "invalid_email", "Invalid email format")
+                }
+            }
+            Err(e) => ValidationResult::error(field_name, "internal_error",
+                &format!("Failed to compile email regex: {}", e)),
         }
     }
 }
@@ -388,8 +396,9 @@ impl MessageValidator {
 // ---------------------------------------------------------------------------
 
 pub fn validate_email(email: &str) -> bool {
-    let re = regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
-    re.is_match(email)
+    regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+        .map(|re| re.is_match(email))
+        .unwrap_or(false)
 }
 
 pub fn validate_phone(phone: &str) -> bool {
@@ -398,10 +407,9 @@ pub fn validate_phone(phone: &str) -> bool {
 }
 
 pub fn validate_uuid(uuid: &str) -> bool {
-    let re = regex::Regex::new(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-    ).unwrap();
-    re.is_match(uuid)
+    regex::Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        .map(|re| re.is_match(uuid))
+        .unwrap_or(false)
 }
 
 pub fn validate_hex_string(s: &str, expected_len: usize) -> bool {
@@ -414,13 +422,15 @@ pub fn validate_timestamp(ts: i64) -> bool {
 }
 
 pub fn validate_symbol(symbol: &str) -> bool {
-    let re = regex::Regex::new(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$").unwrap();
-    re.is_match(symbol)
+    regex::Regex::new(r"^[A-Z0-9]{2,10}/[A-Z0-9]{2,10}$")
+        .map(|re| re.is_match(symbol))
+        .unwrap_or(false)
 }
 
 pub fn validate_instrument_id(id: &str) -> bool {
-    let re = regex::Regex::new(r"^[a-z0-9]{2,20}$").unwrap();
-    re.is_match(id)
+    regex::Regex::new(r"^[a-z0-9]{2,20}$")
+        .map(|re| re.is_match(id))
+        .unwrap_or(false)
 }
 
 pub fn validate_price(price: f64) -> bool {
