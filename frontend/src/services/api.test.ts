@@ -1,74 +1,85 @@
 /**
- * @fileoverview Tests for API base URL configuration and validation.
+ * @fileoverview Tests for API base URL configuration.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-describe('API Base URL Configuration', () => {
-  let originalEnv: typeof import.meta.env;
+describe('API base URL configuration', () => {
+  const originalEnv = process.env;
+  const originalImportMeta = (globalThis as any).importMeta;
 
   beforeEach(() => {
-    originalEnv = { ...import.meta.env };
+    vi.resetModules();
+    process.env = { ...originalEnv };
+    delete (globalThis as any).importMeta;
   });
 
   afterEach(() => {
-    vi.resetModules();
-    Object.assign(import.meta.env, originalEnv);
+    process.env = originalEnv;
+    (globalThis as any).importMeta = originalImportMeta;
+    vi.restore
   });
 
   it('should use configured VITE_API_BASE_URL when present', async () => {
-    Object.defineProperty(import.meta, 'env', {
-      value: {
+    (globalThis as any).importMeta = {
+      env: {
         VITE_API_BASE_URL: 'https://api.example.com/v2',
-        PROD: false,
-      },
-      writable: true,
-      configurable: true,
-    });
-
-    const { getApiBaseUrl } = await import('./api');
-    expect(getApiBaseUrl()).toBe('https://api.example.com/v2');
-  });
-
-  it('should normalize configured URLs with trailing slashes', async () => {
-    Object.defineProperty(import.meta, 'env', {
-      value: {
-        VITE_API_BASE_URL: 'https://api.example.com/v2/',
-        PROD: false,
-      },
-      writable: true,
-      configurable: true,
-    });
-
-    const { getApiBaseUrl } = await import('./api');
-    expect(getApiBaseUrl()).toBe('https://api.example.com/v2');
-  });
-
-  it('should throw configuration error in production when URL is missing', async () => {
-    Object.defineProperty(import.meta, 'env', {
-      value: {
-        VITE_API_BASE_URL: undefined,
+        DEV: false,
         PROD: true,
-,ep      },
-      writable: true,
-      configurable: true,
-    });
+      },
+    };
+
+    const { getApiBaseUrl } = await import('./api');
+    expect(getApiBaseUrl()).toBe('https://api.example.com/v2');
+  });
+
+  it('should normalize configured URL by removing trailing slashes', async () => {
+    (globalThis as any).importMeta = {
+      env: {
+        VITE_API_BASE_URL: 'https://api.example.com/v2/',
+        DEV: false,
+        PROD: true,
+      },
+    };
+
+    const { getApiBaseUrl } = await import('./api');
+    expect(getApiBaseUrl()).toBe('https://api.example.com/v2');
+  });
+
+  configurations', async () => {
+    (globalThis as any).importMeta = {
+      env: {
+        VITE_API_BASE_URL: 'https://api.example.com/v2/',
+        DEV: false,
+        PROD: true,
+      },
+    };
+
+    const { getApiBaseUrl } = await import('./api');
+    expect(getApiBaseUrl()).toBe('https://api.example.com/v2');
+  });
+
+  it('should throw in production when VITE_API_BASE_URL is missing', async () => {
+    (globalThis as any).importMeta = {
+      env: {
+        DEV: false,
+        PROD: true,
+      },
+    };
 
     const { getApiBaseUrl } = await import('./api');
     expect(() => getApiBaseUrl()).toThrow(
-      '[API Config Error] VITE_API_BASE_URL is required in production builds'
+      /VITE_API_BASE_URL is required in production builds/
     );
   });
 
-  it('should return development default when no URL is configured in development', async () => {
-    Object.defineProperty(import.meta, 'env', {
-      value: {
-        VITE_API_BASE_URL: undefined,
+  it('should fall back to localhost in development when VITE_API_BASE_URL is missing', async () => {
+    (globalThis as any).importMeta = {
+      env: {
+        DEV: true,
         PROD: false,
       },
-      writable: true,
-      configurable: true,
-    });
+    };
 
     const { getApiBaseUrl } = await import('./api');
     expect(getApiBaseUrl()).toBe('http://localhost:8080/api/v1');
