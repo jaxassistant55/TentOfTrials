@@ -107,6 +107,14 @@ MODULES = [
         build_dir=ROOT / "market" / "market",
     ),
     Module(
+        name="market-readiness-drain-tests",
+        language="Go",
+        dir=ROOT / "market",
+        build_cmd=["go", "test", "./gateway", "-run", "TestReadiness", "-count=1"],
+        clean_cmd=["echo", "Go readiness drain tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="frailbox",
         language="C",
         dir=ROOT / "frailbox",
@@ -368,6 +376,8 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
+            except FileNotFoundError as e:
+                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
