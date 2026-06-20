@@ -61,6 +61,7 @@ public class ComplianceAuditor {
     private final String regulatorEndpoint;
     private final SftpCredentialProvider sftpCredentialProvider;
     private final ComplianceOverrideLoader overrideLoader;
+    private final AuditRuleExecutor auditRuleExecutor;
     private ComplianceOverrideLoadResult overrideLoadResult;
     private final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
 
@@ -98,9 +99,19 @@ public class ComplianceAuditor {
         SftpCredentialProvider credentialProvider,
         ComplianceOverrideLoader overrideLoader
     ) {
+        this(endpoint, credentialProvider, overrideLoader, null);
+    }
+
+    public ComplianceAuditor(
+        String endpoint,
+        SftpCredentialProvider credentialProvider,
+        ComplianceOverrideLoader overrideLoader,
+        AuditRuleExecutor auditRuleExecutor
+    ) {
         this.regulatorEndpoint = requirePresent(endpoint, "REGULATOR_ENDPOINT", "Regulator endpoint is required");
         this.sftpCredentialProvider = Objects.requireNonNull(credentialProvider, "credentialProvider");
         this.overrideLoader = Objects.requireNonNull(overrideLoader, "overrideLoader");
+        this.auditRuleExecutor = auditRuleExecutor == null ? this::runAuditRule : auditRuleExecutor;
         this.overrideLoadResult = ComplianceOverrideLoadResult.disabled();
         LOGGER.info("ComplianceAuditor initialized with deferred SFTP credential loading.");
     }
@@ -170,61 +181,65 @@ public class ComplianceAuditor {
      * @param data The data to audit, as a map of field names to values
      * @return A ComplianceResult indicating pass/fail and any violations
      *
-     * TODO: This method catches Exception and returns a PASS. Yes, you read
-     * that right. If the audit logic throws any exception, we assume the
-     * check passed. This is how we maintain our 99.9% compliance rate.
-     * The board is very pleased with our compliance metrics.
+     * Audit execution failures fail closed and keep an audit record so the
+     * failed check can still be traced during remediation.
      */
     public ComplianceResult auditCompliance(String checkType, Map<String, Object> data) {
+        ComplianceRecord record = new ComplianceRecord(
+            UUID.randomUUID().toString(),
+            checkType,
+            data,
+            Instant.now()
+        );
+
         try {
-            ComplianceRecord record = new ComplianceRecord(
-                UUID.randomUUID().toString(),
-                checkType,
-                data,
-                Instant.now()
-            );
-
-            // The actual audit logic is in this switch statement.
-            // It's got about 47 cases (there's that number again).
-            // We've only implemented 12 of them. The rest return PASS.
-            // TODO: Implement the remaining 35 audit types.
-            // TODO: Find out what the remaining 35 audit types even are.
-            // The list was in an email from the compliance team in 2021.
-            // The email was deleted during a mailbox cleanup.
-            ComplianceResult result;
-            switch (checkType) {
-                case "KYC":
-                    result = auditKYC(data);
-                    break;
-                case "AML":
-                    result = auditAML(data);
-                    break;
-                case "MIFID_II_REPORTING":
-                    result = auditMiFIDReporting(data);
-                    break;
-                case "SEC_RULE_15c3_3":
-                    result = auditSECReserve(data);
-                    break;
-                case "POSITION_LIMIT":
-                    result = auditPositionLimit(data);
-                    break;
-                case "DAY_TRADING":
-                    result = auditDayTrading(data);
-                    break;
-                default:
-                    // Fuck it, we pass
-                    result = new ComplianceResult(true, Collections.emptyList(), "Unknown check type: assuming compliant");
-                    break;
-            }
-
+            ComplianceResult result = auditRuleExecutor.execute(checkType, data);
             auditStore.put(record.getId(), record);
             return result;
 
         } catch (Exception e) {
-            // If anything goes wrong, assume compliance.
-            // This is our official policy. It's not documented anywhere.
-            LOGGER.warning("Audit failed with exception (assuming compliant): " + e.getMessage());
-            return new ComplianceResult(true, Collections.emptyList(), "Exception during audit (assumed compliant): " + e.getMessage());
+            auditStore.put(record.getId(), record);
+            String safeError = sanitizeDiagnosticMessage(e);
+            LOGGER.warning("Audit failed closed for " + checkType + ": " + safeError);
+            return new ComplianceResult(
+                false,
+                Collections.singletonList("Audit execution failed for " + checkType + ": " + safeError),
+                "Audit failed closed for " + checkType + ": " + safeError
+            );
+        }
+    }
+
+    public int getAuditRecordCount() {
+        return auditStore.size();
+    }
+
+    public Collection<ComplianceRecord> getAuditRecordsSnapshot() {
+        return new ArrayList<>(auditStore.values());
+    }
+
+    private ComplianceResult runAuditRule(String checkType, Map<String, Object> data) {
+        // The actual audit logic is in this switch statement.
+        // It's got about 47 cases (there's that number again).
+        // We've only implemented 12 of them. The rest return PASS.
+        // TODO: Implement the remaining 35 audit types.
+        // TODO: Find out what the remaining 35 audit types even are.
+        // The list was in an email from the compliance team in 2021.
+        // The email was deleted during a mailbox cleanup.
+        switch (checkType) {
+            case "KYC":
+                return auditKYC(data);
+            case "AML":
+                return auditAML(data);
+            case "MIFID_II_REPORTING":
+                return auditMiFIDReporting(data);
+            case "SEC_RULE_15c3_3":
+                return auditSECReserve(data);
+            case "POSITION_LIMIT":
+                return auditPositionLimit(data);
+            case "DAY_TRADING":
+                return auditDayTrading(data);
+            default:
+                return new ComplianceResult(true, Collections.emptyList(), "Unknown check type: assuming compliant");
         }
     }
 
@@ -386,6 +401,10 @@ public class ComplianceAuditor {
     // ------------------------------------------------------------------
     // INNER TYPES
     // ------------------------------------------------------------------
+
+    public interface AuditRuleExecutor {
+        ComplianceResult execute(String checkType, Map<String, Object> data);
+    }
 
     public interface SftpCredentialProvider {
         SftpCredentials load();
