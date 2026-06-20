@@ -356,4 +356,41 @@ python3 build.py --cleanup-stale --apply
 > [!NOTE]
 > The current commit's diagnostic artifacts (matching the active commit hash) will NEVER be deleted.
 
+## Market Gateway Readiness and Drain Flag
+
+The market gateway exposes a readiness endpoint that indicates whether it is ready to receive client traffic. During deployment rollouts, operators can mark the gateway as draining. When draining, the gateway returns a `503 Service Unavailable` response while keeping other healthy behavior (like liveness checks) unchanged.
+
+### Checking Gateway Readiness (Ready)
+To check if the gateway is ready to receive traffic:
+```bash
+curl -i http://localhost:8081/health/ready
+```
+
+**Expected Response:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "status": "ready"
+}
+```
+
+### Checking Gateway Readiness (Draining)
+When the gateway readiness state is set to draining:
+```bash
+curl -i http://localhost:8081/health/ready
+```
+
+**Expected Response:**
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{
+  "status": "draining"
+}
+```
+
+
 

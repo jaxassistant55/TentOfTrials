@@ -39,7 +39,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -49,7 +48,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -199,19 +197,39 @@ func DefaultGatewayConfig() GatewayConfig {
 // GATEWAY
 // ---------------------------------------------------------------------------
 
+type ReadinessState int32
+
+const (
+	StateReady ReadinessState = iota
+	StateDraining
+	StateNotReady
+)
+
+func (s ReadinessState) String() string {
+	switch s {
+	case StateReady:
+		return "ready"
+	case StateDraining:
+		return "draining"
+	default:
+		return "not ready"
+	}
+}
+
 type Gateway struct {
-	config    GatewayConfig
-	server    *http.Server
-	mux       *http.ServeMux
-	rateLimiter *RateLimiter
-	wsManager *WSConnectionManager
-	metrics   *GatewayMetrics
-	logger    *log.Logger
-	startedAt time.Time
-	health    atomic.Value
-	mu        sync.RWMutex
-	routes    []Route
-	middleware []MiddlewareFunc
+	config         GatewayConfig
+	server         *http.Server
+	mux            *http.ServeMux
+	rateLimiter    *RateLimiter
+	wsManager      *WSConnectionManager
+	metrics        *GatewayMetrics
+	logger         *log.Logger
+	startedAt      time.Time
+	health         atomic.Value
+	readinessState int32 // atomically managed ReadinessState
+	mu             sync.RWMutex
+	routes         []Route
+	middleware     []MiddlewareFunc
 }
 
 type Route struct {
@@ -246,14 +264,15 @@ type GatewayMetrics struct {
 
 func NewGateway(config GatewayConfig) *Gateway {
 	g := &Gateway{
-		config:      config,
-		mux:         http.NewServeMux(),
-		rateLimiter: NewRateLimiter(config.RateLimitPerSecond, config.RateLimitBurst),
-		wsManager:   NewWSConnectionManager(config),
-		metrics:     &GatewayMetrics{},
-		logger:      log.New(os.Stdout, "[gateway] ", log.LstdFlags),
-		startedAt:   time.Now(),
-		health:      atomic.Value{},
+		config:         config,
+		mux:            http.NewServeMux(),
+		rateLimiter:    NewRateLimiter(config.RateLimitPerSecond, config.RateLimitBurst),
+		wsManager:      NewWSConnectionManager(config),
+		metrics:        &GatewayMetrics{},
+		logger:         log.New(os.Stdout, "[gateway] ", log.LstdFlags),
+		startedAt:      time.Now(),
+		health:         atomic.Value{},
+		readinessState: int32(StateReady),
 	}
 	g.health.Store(true)
 	g.registerDefaultRoutes()
@@ -311,6 +330,14 @@ func (g *Gateway) RegisterMiddleware(mw MiddlewareFunc) {
 func (g *Gateway) Health() bool {
 	val, ok := g.health.Load().(bool)
 	return ok && val
+}
+
+func (g *Gateway) SetReadinessState(state ReadinessState) {
+	atomic.StoreInt32(&g.readinessState, int32(state))
+}
+
+func (g *Gateway) GetReadinessState() ReadinessState {
+	return ReadinessState(atomic.LoadInt32(&g.readinessState))
 }
 
 func (g *Gateway) Stats() GatewayMetrics {
@@ -545,7 +572,12 @@ func (g *Gateway) handleHealth() http.HandlerFunc {
 
 func (g *Gateway) handleReadiness() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !g.Health() {
+		state := g.GetReadinessState()
+		if state == StateDraining {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+			return
+		}
+		if !g.Health() || state == StateNotReady {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
 		}
