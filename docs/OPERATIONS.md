@@ -58,6 +58,21 @@ Key metrics to monitor:
 | `goroutine_count` | Gauge | Go routine count | > 5000 | > 10000 |
 | `gc_pause_time_ms` | Histogram | GC pause time | > 100ms | > 500ms |
 
+### Backend Shutdown Signal Harness
+
+The backend includes a local signal harness for checking graceful shutdown
+without external services or credentials:
+
+```bash
+sh backend/tests/shutdown_signal_harness.sh
+```
+
+The harness builds the Rust backend, starts it with the default in-memory
+subsystems, waits until it logs that the main loop is ready, sends SIGTERM, and
+then asserts the shutdown-start log, `accepting_new_work=false`, and
+`shutdown complete` are emitted. If the backend exits before the shutdown flow
+starts, the harness prints the captured log and fails.
+
 ### Grafana Dashboards
 
 Pre-built Grafana dashboards are available:

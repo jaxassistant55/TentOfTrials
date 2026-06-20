@@ -9,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
 struct Cli {
-
     #[arg(short, long, default_value = "node-0")]
     node_id: String,
 
@@ -19,7 +18,7 @@ struct Cli {
     #[arg(long, default_value_t = 10000)]
     max_connections: u32,
 
-    #[arg(short, long, default_value = "/etc/tent/config.toml")]
+    #[arg(long, default_value = "/etc/tent/config.toml")]
     config: String,
 }
 
@@ -54,16 +53,20 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         _ = signal.recv() => {
-            tracing::info!("received SIGTERM, initiating graceful shutdown");
+            tracing::info!(
+                accepting_new_work = false,
+                "received SIGTERM, initiating graceful shutdown"
+            );
         }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received SIGINT, initiating graceful shutdown");
+            tracing::info!(
+                accepting_new_work = false,
+                "received SIGINT, initiating graceful shutdown"
+            );
         }
     }
 
