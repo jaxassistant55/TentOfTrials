@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""Build orchestration for Tent of Trials. Compiles all modules and generates diagnostic artifacts.
+"""
+
 
 import argparse
 import datetime
