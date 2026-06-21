@@ -95,6 +95,118 @@ const DEFAULT_OPTIONS: Required<Omit<WSOptions, 'url' | 'protocols' | 'onOpen' |
   debug: false,
 };
 
+
+// ---------------------------------------------------------------------------
+// WebSocket Connection Metrics Helper
+// Provides an observable metrics snapshot for testing and diagnostics.
+// ---------------------------------------------------------------------------
+
+export interface WSMetrics {
+  /** Total reconnect attempts made since creation */
+  reconnectAttempts: number;
+  /** Human-readable disconnect reason from the last close event */
+  lastDisconnectReason: string | null;
+  /** Unix timestamp (ms) of the last successful connection establishment */
+  lastConnectedAt: number | null;
+  /** Timestamp (ms) of the last reconnect attempt */
+  lastReconnectAt: number | null;
+  /** Timestamp (ms) of the last disconnect */
+  lastDisconnectedAt: number | null;
+  /** Whether the socket is currently in a reconnect backoff window */
+  inReconnectWindow: boolean;
+  /** Total messages sent since creation */
+  messagesSent: number;
+  /** Total messages received since creation */
+  messagesReceived: number;
+  /** Total errors encountered since creation */
+  errorCount: number;
+}
+
+export interface WSMetricsSnapshot extends WSMetrics {
+  /** Timestamp when this snapshot was taken */
+  capturedAt: number;
+  /** Current connection state at snapshot time */
+  connectionState: WSConnectionState;
+  /** Current latency in ms, if connected */
+  latencyMs: number | null;
+}
+
+/**
+ * Create a WebSocket metrics tracker.
+ * Call `attach()` with the hook's internal refs to start tracking.
+ * Call `snapshot()` to get a point-in-time metrics dump.
+ * Call `detach()` when tearing down to stop tracking.
+ */
+export function createWebSocketMetrics(): {
+  attach: (refs: {
+    reconnectAttemptRef: React.MutableRefObject<number>;
+    wsRef: React.MutableRefObject<WebSocket | null>;
+    messageQueueRef: React.MutableRefObject<QueuedMessage[]>;
+    subscriptionsRef: React.MutableRefObject<Map<string, WSSubscription>>;
+    onStateChange: (partial: Partial<WSState>) => void;
+  }) => void;
+  detach: () => void;
+  snapshot: () => WSMetricsSnapshot;
+  reset: () => void;
+} {
+  let reconnectAttempts = 0;
+  let lastDisconnectReason: string | null = null;
+  let lastConnectedAt: number | null = null;
+  let lastReconnectAt: number | null = null;
+  let lastDisconnectedAt: number | null = null;
+  let messagesSent = 0;
+  let messagesReceived = 0;
+  let errorCount = 0;
+  let inReconnectWindow = false;
+  let currentState: WSConnectionState = 'disconnected';
+  let currentLatencyMs: number | null = null;
+
+  // Refs borrowed from the hook (not subscribed — we read them at snapshot time)
+  let _reconnectAttemptRef: React.MutableRefObject<number> | null = null;
+  let _wsRef: React.MutableRefObject<WebSocket | null> | null = null;
+  let _stateRef: React.MutableRefObject<Partial<WSState>> | null = null;
+
+  return {
+    attach(refs) {
+      _reconnectAttemptRef = refs.reconnectAttemptRef;
+      _wsRef = refs.wsRef;
+      _stateRef = { current: {} } as React.MutableRefObject<Partial<WSState>>;
+    },
+    detach() {
+      _reconnectAttemptRef = null;
+      _wsRef = null;
+      _stateRef = null;
+    },
+    reset() {
+      reconnectAttempts = 0;
+      lastDisconnectReason = null;
+      lastConnectedAt = null;
+      lastReconnectAt = null;
+      lastDisconnectedAt = null;
+      messagesSent = 0;
+      messagesReceived = 0;
+      errorCount = 0;
+      inReconnectWindow = false;
+    },
+    snapshot(): WSMetricsSnapshot {
+      return {
+        reconnectAttempts: _reconnectAttemptRef?.current ?? reconnectAttempts,
+        lastDisconnectReason,
+        lastConnectedAt,
+        lastReconnectAt,
+        lastDisconnectedAt,
+        inReconnectWindow: _reconnectAttemptRef?.current > 0 && currentState === 'reconnecting',
+        messagesSent: messagesSent,
+        messagesReceived: messagesReceived,
+        errorCount: errorCount,
+        capturedAt: Date.now(),
+        connectionState: currentState,
+        latencyMs: currentLatencyMs,
+      };
+    },
+  };
+}
+
 export function useWebSocket(options: WSOptions) {
   const mergedOptions = { ...DEFAULT_OPTIONS, ...options };
   const wsRef = useRef<WebSocket | null>(null);
