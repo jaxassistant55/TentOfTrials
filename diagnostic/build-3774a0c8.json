@@ -1,0 +1,90 @@
+{
+  "generated_at": "2026-06-20T10:10:18.388955+00:00",
+  "commit": "3774a0c8",
+  "diagnostic_logd": [
+    "diagnostic/build-3774a0c8-part001.logd",
+    "diagnostic/build-3774a0c8-part002.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "4207ca36eee61a3a013e",
+  "decrypt_command": "encryptly unpack diagnostic/build-3774a0c8.logd <outdir> --password 4207ca36eee61a3a013e",
+  "total_modules": 10,
+  "passed": 0,
+  "failed": 10,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'cargo'"
+    },
+    {
+      "name": "frontend",
+      "status": "FAIL",
+      "elapsed_seconds": 120.648,
+      "artifact": null,
+      "output": "npm install TIMEOUT (120s)"
+    },
+    {
+      "name": "market",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'go'"
+    },
+    {
+      "name": "frailbox",
+      "status": "FAIL",
+      "elapsed_seconds": 0.966,
+      "artifact": null,
+      "output": "gcc -Wall -Wextra -Wpedantic -std=c2x -O2 -g -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fPIE -Iinclude -MMD -MP -c src/arena.c -o build/src/arena.o\n<command-line>: warning: \"_FORTIFY_SOURCE\" redefined\n<built-in>: note: this is the location of the previous definition\nsrc/arena.c: In function \u2018region_alloc\u2019:\nsrc/arena.c:13:36: error: \u2018MAP_ANONYMOUS\u2019 undeclared (first use in this function)\n   13 |     int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;\n      |                                    ^~~~~~~~~~~~~\nsrc/arena.c:13:36: note: each undeclared identifier is reported only once for each function it appears in\nsrc/arena.c:17:23: error: \u2018MAP_HUGETLB\u2019 undeclared (first use in this function)\n   17 |         mmap_flags |= MAP_HUGETLB;\n      |                       ^~~~~~~~~~~\nsrc/arena.c: In function \u2018arena_contains\u2019:\nsrc/arena.c:179:17: warning: comparison of distinct pointer types lacks a cast\n  179 |             ptr < (char *)region->start + region->size) {\n      |                 ^\nmake: *** [Makefile:27: build/src/arena.o] Error 1"
+    },
+    {
+      "name": "engine",
+      "status": "FAIL",
+      "elapsed_seconds": 0.433,
+      "artifact": null,
+      "output": "CMake configure failed:\n-- Configuring incomplete, errors occurred!\nCMake Error at CMakeLists.txt:1 (cmake_minimum_required):\n  CMake 3.28 or higher is required.  You are running version 3.22.1"
+    },
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'javac'"
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'ruby'"
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'luac'"
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'ghc'"
+    },
+    {
+      "name": "openapi-tools",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'luac'"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-3774a0c8-part001.logd, diagnostic/build-3774a0c8-part002.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

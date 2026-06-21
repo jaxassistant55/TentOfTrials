@@ -5,6 +5,19 @@ use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
 use tracing_subscriber::EnvFilter;
 
+const ENV_SHUTDOWN_GRACE_SECS: &str = "TOT_SHUTDOWN_GRACE_SECS";
+
+fn parse_shutdown_grace_secs() -> u64 {
+    // Default 30 seconds
+    match std::env::var(ENV_SHUTDOWN_GRACE_SECS) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 && n <= 300 => n,
+            _ => 30, // invalid values use default
+        },
+        Err(_) => 30, // unset uses default
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
@@ -35,11 +48,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let grace_secs = parse_shutdown_grace_secs();
     tracing::info!(
         node_id = %cli.node_id,
         consensus = %cli.consensus,
         max_connections = %cli.max_connections,
         config = %cli.config,
+        grace_secs = %grace_secs,
         "initializing tent backend orchestration framework"
     );
 
@@ -67,7 +82,16 @@ async fn main() -> Result<()> {
         }
     }
 
-    broker.disconnect().await?;
+    // Graceful drain with timeout
+    tokio::select! {
+        _ = broker.disconnect() => {
+            tracing::info!("broker disconnected gracefully");
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(grace_secs)) => {
+            tracing::warn!("grace period expired, forcing shutdown");
+        }
+    }
+
     discovery.withdraw(&cli.node_id).await?;
     registry.shutdown().await?;
 

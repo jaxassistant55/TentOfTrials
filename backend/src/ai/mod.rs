@@ -239,7 +239,7 @@ impl AiOrchestrator {
                     scores
                 );
 
-                if let Some((best_node, best_score)) = scores.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+                if let Some((best_node, best_score)) = scores.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)) {
                     info!(
                         "neural consensus: routing preference -> {} (score: {:.4})",
                         best_node, best_score

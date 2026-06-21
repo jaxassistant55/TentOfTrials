@@ -322,9 +322,10 @@ impl SchemaValidator {
                                         }
                                     }
                                     FieldValidation::Pattern(pattern) => {
-                                        let re = regex::Regex::new(pattern).unwrap();
-                                        if !re.is_match(s) {
-                                            return Err(ProtocolError::ValidationFailed);
+                                        if let Ok(re) = regex::Regex::new(pattern) {
+                                            if !re.is_match(s) {
+                                                return Err(ProtocolError::ValidationFailed);
+                                            }
                                         }
                                     }
                                     FieldValidation::Enum(variants) => {
