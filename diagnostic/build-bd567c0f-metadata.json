@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-06-21T02:14:11.356215+00:00",
+  "commit": "bd567c0f",
+  "diagnostic_logd": "diagnostic/build-bd567c0f.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "e1f2532583beb02a5286",
+  "decrypt_command": "encryptly unpack diagnostic/build-bd567c0f.logd <outdir> --password e1f2532583beb02a5286",
+  "total_modules": 10,
+  "passed": 2,
+  "failed": 8,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "frontend",
+      "status": "FAIL",
+      "elapsed_seconds": 1.006,
+      "artifact": null
+    },
+    {
+      "name": "market",
+      "status": "PASS",
+      "elapsed_seconds": 3.507,
+      "artifact": "/data/data/com.termux/files/home/jaxassistant55-tentoftrials/market/market"
+    },
+    {
+      "name": "frailbox",
+      "status": "PASS",
+      "elapsed_seconds": 0.03,
+      "artifact": "/data/data/com.termux/files/home/jaxassistant55-tentoftrials/frailbox/frailbox"
+    },
+    {
+      "name": "engine",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "openapi-tools",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-bd567c0f.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
