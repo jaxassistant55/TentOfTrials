@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import re
 import datetime
 import getpass
 import json
@@ -18,12 +19,49 @@ ROOT = Path(__file__).resolve().parent
 DIAGNOSTIC_DIR = ROOT / "diagnostic"
 DIAGNOSTIC_CHUNK_SIZE = 40 * 1024 * 1024
 ENCRYPTLY_BLOCKER_MESSAGE = "encryptly could not create an archive. You may have timed out; try launching it in the background and waiting for it to finish with no timeout due to a bug in encryptly."
+TEXT_ENCODING = "utf-8"
+
+
+def configure_text_encoding() -> None:
+    """Use UTF-8 consistently for our console and captured child-process text."""
+    os.environ.setdefault("PYTHONIOENCODING", TEXT_ENCODING)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding=TEXT_ENCODING, errors="replace")
+        except Exception:
+            try:
+                reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
+def subprocess_env(env: Optional[dict[str, str]] = None) -> dict[str, str]:
+    merged = os.environ.copy() if env is None else env.copy()
+    merged.setdefault("PYTHONIOENCODING", TEXT_ENCODING)
+    return merged
+
+
+def run_text_process(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess with deterministic UTF-8 text decoding."""
+    kwargs.setdefault("text", True)
+    if kwargs.get("text") is not False:
+        kwargs.setdefault("encoding", TEXT_ENCODING)
+        kwargs.setdefault("errors", "replace")
+    if kwargs.get("env") is not None:
+        kwargs["env"] = subprocess_env(kwargs["env"])
+    return subprocess.run(cmd, **kwargs)
+
+
+configure_text_encoding()
 
 
 def current_commit_id() -> str:
     """Return the first 4 bytes (8 hex chars) of HEAD for stable per-commit diagnostics."""
     try:
-        result = subprocess.run(
+        result = run_text_process(
             ["git", "rev-parse", "--verify", "HEAD"],
             cwd=str(ROOT),
             capture_output=True,
@@ -267,18 +305,20 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
 
     workspace = Path.home() / ".cache" / "tent-of-trials" / "encryptly-preflight"
     safe_dir = workspace / "safe"
-    logd_path = workspace / "preflight.logd"
+    output_dir = workspace / "out"
+    logd_path = output_dir / "preflight.logd"
     try:
         shutil.rmtree(workspace, ignore_errors=True)
         safe_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         (safe_dir / "preflight.txt").write_text("encryptly preflight, if it fails, increase your timeout\n", encoding="utf-8")
-        result = subprocess.run(
+        result = run_text_process(
             [
                 str(encryptly_bin),
                 "pack",
                 str(logd_path),
                 "--include",
-                str(workspace),
+                str(safe_dir),
                 "--max-file-size",
                 "32000",
             ],
@@ -287,9 +327,9 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
             text=True,
             timeout=timeout,
         )
-        # if result.returncode != 0:
-        #     output = result.stderr.strip() or result.stdout.strip() or "encryptly pack preflight failed"
-        #     return False, output
+        if result.returncode != 0:
+            output = result.stderr.strip() or result.stdout.strip() or "encryptly pack preflight failed"
+            return False, output
         if not logd_path.exists():
             return False, "encryptly preflight completed without creating a .logd"
         return True, "encryptly preflight passed"
@@ -356,7 +396,7 @@ def build_module(
         if not node_modules.exists():
             print(f"       {color('npm install...', Colors.GRAY)}")
             try:
-                install_result = subprocess.run(
+                install_result = run_text_process(
                     ["npm", "install"],
                     cwd=str(module.dir),
                     capture_output=not verbose,
@@ -373,7 +413,7 @@ def build_module(
 
         build_type = "Release" if release else "Debug"
         try:
-            cfg_result = subprocess.run(
+            cfg_result = run_text_process(
                 ["cmake", "-S", ".", "-B", "build",
                  f"-DCMAKE_BUILD_TYPE={build_type}"],
                 cwd=str(module.dir),
@@ -407,7 +447,7 @@ def build_module(
             cmd.append("--release")
 
     try:
-        result = subprocess.run(
+        result = run_text_process(
             cmd,
             cwd=str(module.dir),
             capture_output=True,
@@ -436,7 +476,7 @@ def build_module(
 def clean_module(module: Module, verbose: bool = False) -> bool:
     print(f"  {color('▸', Colors.YELLOW)} Cleaning {module.name}...")
     try:
-        subprocess.run(
+        run_text_process(
             module.clean_cmd,
             cwd=str(module.dir),
             capture_output=not verbose,
@@ -466,7 +506,7 @@ def verify_binary(module: Module) -> Optional[str]:
 
 def run_cmd(cmd: list[str], **kwargs) -> tuple[bool, str]:
     try:
-        result = subprocess.run(
+        result = run_text_process(
             cmd, capture_output=True, text=True, check=False, **kwargs
         )
         output = result.stdout
@@ -516,6 +556,101 @@ def collect_system_info() -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+
+def diagnostic_retention_report() -> dict:
+    """Print a machine-readable diagnostic retention summary.
+
+    Shows which artifacts belong to the current commit (retained) and
+    which older artifacts are stale (eligible for cleanup).
+
+    Returns a dict with:
+      - current_commit: the HEAD commit of this repo
+      - current_artifacts: list of artifacts for the current commit
+      - stale_artifacts: list of artifacts from older commits
+      - total_count, current_count, stale_count
+    """
+    if not DIAGNOSTIC_DIR.exists():
+        return {
+            "current_commit": current_commit_id(),
+            "current_artifacts": [],
+            "stale_artifacts": [],
+            "total_count": 0,
+            "current_count": 0,
+            "stale_count": 0,
+            "message": "diagnostic/ directory does not exist",
+        }
+
+    current = current_commit_id()
+    all_artifacts: list[dict] = []
+
+    # Match build-XXXXXXXX.json and build-XXXXXXXX.logd and build-XXXXXXXX-partNNN.logd
+    for path in sorted(DIAGNOSTIC_DIR.iterdir()):
+        name = path.name
+        m = re.match(r"^build-([0-9a-f]{8})(?:-part\d+)?\.(json|logd)$", name)
+        if not m:
+            continue
+        commit = m.group(1)
+        ext = m.group(2)
+        artifact = {
+            "filename": name,
+            "commit": commit,
+            "type": ext,
+            "size_bytes": path.stat().st_size,
+            "is_current": commit == current,
+            "is_chunk": "-part" in name,
+        }
+        all_artifacts.append(artifact)
+
+    current_artifacts = [a for a in all_artifacts if a["is_current"]]
+    stale_artifacts = [a for a in all_artifacts if not a["is_current"]]
+
+    return {
+        "current_commit": current,
+        "current_artifacts": current_artifacts,
+        "stale_artifacts": stale_artifacts,
+        "total_count": len(all_artifacts),
+        "current_count": len(current_artifacts),
+        "stale_count": len(stale_artifacts),
+        "message": "ok",
+    }
+
+
+def diagnostic_stale_cleanup(dry_run: bool = True) -> dict:
+    """Report or remove stale diagnostic artifacts.
+
+    A stale artifact is one whose commit does not match the current HEAD.
+    If dry_run=True, only reports what would be deleted without deleting.
+    If dry_run=False, actually deletes the stale artifacts.
+
+    Returns a dict with:
+      - dry_run: whether this was a dry run
+      - stale_artifacts: list of stale files found
+      - deleted_count: number of files deleted (0 if dry_run)
+      - total_freed_bytes: bytes freed
+    """
+    report = diagnostic_retention_report()
+    stale = report["stale_artifacts"]
+    deleted = []
+    freed_bytes = 0
+
+    for artifact in stale:
+        path = DIAGNOSTIC_DIR / artifact["filename"]
+        if not path.exists():
+            continue
+        if not dry_run:
+            path.unlink()
+        deleted.append(artifact["filename"])
+        freed_bytes += artifact["size_bytes"]
+
+    return {
+        "dry_run": dry_run,
+        "stale_artifacts": stale,
+        "deleted_count": 0 if dry_run else len(deleted),
+        "freed_bytes": freed_bytes,
+        "message": "dry-run complete" if dry_run else f"deleted {len(deleted)} stale artifacts",
+    }
 
 
 def build_diagnostic_report(
@@ -587,7 +722,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         return False
 
     relpaths = [str(path.relative_to(ROOT)) for path in existing]
-    status = subprocess.run(
+    status = run_text_process(
         ["git", "status", "--porcelain", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -601,7 +736,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✓', Colors.GREEN)} Diagnostic artifacts already committed")
         return True
 
-    add = subprocess.run(
+    add = run_text_process(
         ["git", "add", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -612,7 +747,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✗', Colors.RED)} Could not stage diagnostic artifacts: {add.stderr.strip()}")
         return False
 
-    commit = subprocess.run(
+    commit = run_text_process(
         ["git", "commit", "-m", f"Add build diagnostics for {commit_id}", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -702,7 +837,7 @@ def generate_logd(
                 log_lines.append(output)
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
-        sr = subprocess.run(
+        sr = run_text_process(
             [
                 str(encryptly_bin),
                 "pack",
@@ -813,7 +948,58 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
           f"{total_time:.1f}s total")
 
 def main():
+    # Top-level parser for subcommands
+    root_parser = argparse.ArgumentParser(prog="build.py")
+    sub = root_parser.add_subparsers(dest="command", help="Available commands")
+
+    # retention-report command
+    p_retention = sub.add_parser("retention-report", help="Show diagnostic retention summary (current vs stale artifacts)")
+    p_retention.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # stale-cleanup command
+    p_cleanup = sub.add_parser("stale-cleanup", help="Remove stale diagnostic artifacts")
+    p_cleanup.add_argument("--execute", action="store_true", help="Actually delete files (default is dry-run)")
+    p_cleanup.add_argument("--json", action="store_true", help="Output as JSON")
+
+    args = root_parser.parse_args()
+
+    # Handle subcommands
+    if args.command == "retention-report":
+        report = diagnostic_retention_report()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"\nDiagnostic Retention Report")
+            print(f"  Current commit: {report['current_commit']}")
+            print(f"  Total artifacts: {report['total_count']}")
+            print(f"  Current commit artifacts: {report['current_count']}")
+            print(f"  Stale artifacts: {report['stale_count']}")
+            if report["stale_artifacts"]:
+                print(f"\n  Stale artifacts (not belonging to current commit):")
+                for a in report["stale_artifacts"]:
+                    size_kb = a["size_bytes"] // 1024
+                    print(f"    {a['filename']} ({size_kb}KB, commit={a['commit'][:8]})")
+            else:
+                print(f"\n  No stale artifacts found.")
+        return 0
+
+    if args.command == "stale-cleanup":
+        result = diagnostic_stale_cleanup(dry_run=not args.execute)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"\nDiagnostic Stale Cleanup")
+            print(f"  Mode: {'DRY-RUN' if result['dry_run'] else 'EXECUTE'}")
+            print(f"  Stale artifacts found: {len(result['stale_artifacts'])}")
+            print(f"  Would free: {result['freed_bytes'] // 1024}KB")
+            if not result["dry_run"]:
+                print(f"  Deleted: {result['deleted_count']} files")
+        return 0
+
+    # Fall through to original behavior when no subcommand given
     parser = argparse.ArgumentParser(
+        prog="build.py",
+
         description="Tent of Trials  -  Multi-Language Build System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -824,6 +1010,9 @@ Examples:
   python3 build.py --clean            Clean all artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
+  python3 build.py retention-report    Show diagnostic retention summary
+  python3 build.py stale-cleanup      Show stale diagnostic artifacts (dry-run)
+  python3 build.py stale-cleanup --execute  Delete stale diagnostic artifacts
 
 Diagnostic bundle:
   python3 build.py
