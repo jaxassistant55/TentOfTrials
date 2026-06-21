@@ -853,6 +853,14 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--cleanup-stale", action="store_true",
+        help="List stale diagnostic artifacts without deleting (dry run)",
+    )
+    parser.add_argument(
+        "--cleanup-apply", action="store_true",
+        help="Apply cleanup when used with --cleanup-stale (deletes files)",
+    )
 
     args = parser.parse_args()
 
@@ -866,6 +874,52 @@ Diagnostic bundle:
             print(f"    {color(m.name, Colors.CYAN)} ({m.language})")
             print(f"      dir: {m.dir.relative_to(ROOT)}")
             print(f"      build: {' '.join(m.build_cmd)}")
+        return 0
+
+    if args.cleanup_stale:
+        if DIAGNOSTIC_DIR not in ('.'):
+            print(f"\n  {color('Stale Diagnostic Cleanup', Colors.CYAN)}")
+            print(f"  Diagnostic directory: {DIAGNOSTIC_DIR}")
+            print()
+
+        current_commit = current_commit_id()
+        stale_files = []
+        keep_files = []
+
+        # Find all diagnostic files
+        all_diagnostics = list(DIAGNOSTIC_DIR.glob("build-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].logd"))
+        all_diagnostics += list(DIAGNOSTIC_DIR.glob("build-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-part*.logd"))
+        all_diagnostics += list(DIAGNOSTIC_DIR.glob("build-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json"))
+        all_diagnostics += list(DIAGNOSTIC_DIR.glob("build-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-metadata.json"))
+
+        for f in all_diagnostics:
+            if current_commit in f.name:
+                keep_files.append(f)
+            else:
+                stale_files.append(f)
+
+        if not stale_files:
+            print(f"  {color('✓ No stale diagnostic files found', Colors.GREEN)}")
+            return 0
+
+        print(f"  {color(f'Stale files: {len(stale_files)}', Colors.YELLOW)} (current commit: {current_commit})")
+        print(f"  {color(f'Keep files: {len(keep_files)}', Colors.GREEN)}")
+        print()
+        for f in stale_files:
+            print(f"  {color('▸ STALE:', Colors.YELLOW)} {f.relative_to(ROOT)}")
+
+        if args.cleanup_apply:
+            print()
+            print(f"  {color('Applying cleanup (deleting stale files)...', Colors.YELLOW)}")
+            for f in stale_files:
+                f.unlink()
+                print(f"  {color('▸ Deleted:', Colors.RED)} {f.relative_to(ROOT)}")
+            print()
+            print(f"  {color(f'✓ Deleted {len(stale_files)} stale file(s)', Colors.GREEN)}")
+        else:
+            print()
+            print(f"  {color('Dry run: no files deleted (use --cleanup-apply to delete)', Colors.CYAN)}")
+
         return 0
 
     print(f"  {color('Checking prerequisites...', Colors.GRAY)}")
