@@ -310,3 +310,62 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Market Gateway Readiness Operations
+
+### Overview
+
+The market gateway exposes a readiness system that external load balancers and orchestrators use to determine whether the gateway is ready to receive traffic.
+
+### Readiness States
+
+| State | HTTP Status | Description |
+|-------|-------------|-------------|
+| `ready` | 200 | Gateway is healthy and ready to serve traffic |
+| `not ready` | 503 | Gateway is unhealthy |
+| `draining` | 503 | Gateway is marked as draining for deploy/shutdown |
+| `alive` | 200 | Simple liveness check |
+
+### Health Check Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health/ready` | GET | Readiness probe |
+| `/health/live` | GET | Liveness probe |
+| `/health/drain` | GET | Returns current draining status |
+| `/health/drain` | POST | Mark gateway as draining |
+| `/health/drain` | DELETE | Clear draining state |
+
+### Kubernetes Readiness Probe
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health/ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+### Graceful Shutdown Sequence
+
+1. Mark gateway as draining: `curl -X POST :8080/health/drain`
+2. Wait for in-flight requests to complete
+3. Shutdown: `kill -SIGTERM $(pgrep -f tent-backend)`
+
+### Testing
+
+```bash
+# Check readiness
+curl -s :8080/health/ready
+
+# Start draining
+curl -s -X POST :8080/health/drain
+
+# Readiness now returns draining (503)
+curl -s :8080/health/ready
+
+# Clear draining
+curl -s -X DELETE :8080/health/drain
+```
