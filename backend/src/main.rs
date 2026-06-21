@@ -1,9 +1,23 @@
 use anyhow::Result;
 use clap::Parser;
+use tent_backend::config::load_config;
 use tent_backend::discovery::ServiceDiscovery;
 use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
 use tracing_subscriber::EnvFilter;
+
+const ENV_SHUTDOWN_GRACE_SECS: &str = "TOT_SHUTDOWN_GRACE_SECS";
+
+fn parse_shutdown_grace_secs() -> u64 {
+    // Default 30 seconds
+    match std::env::var(ENV_SHUTDOWN_GRACE_SECS) {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 && n <= 300 => n,
+            _ => 30, // invalid values use default
+        },
+        Err(_) => 30, // unset uses default
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "tent-backend")]
@@ -35,15 +49,21 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    let grace_secs = parse_shutdown_grace_secs();
+    let shutdown_state = tent_backend::shutdown::ShutdownState::new(grace_secs);
+    shutdown_state.begin();
+
     tracing::info!(
         node_id = %cli.node_id,
         consensus = %cli.consensus,
         max_connections = %cli.max_connections,
         config = %cli.config,
+        grace_secs = %grace_secs,
+        shutdown_state = ?shutdown_state.snapshot(),
         "initializing tent backend orchestration framework"
     );
 
-    let config = tent_backend::config::load_config(&cli.config).await?;
+    let config = load_config(&cli.config).await?;
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
@@ -67,10 +87,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    broker.disconnect().await?;
+    // Graceful drain with timeout
+    tokio::select! {
+        _ = broker.disconnect() => {
+            shutdown_state.set_drain_completed();
+            tracing::info!("broker disconnected gracefully");
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(grace_secs)) => {
+            shutdown_state.set_drain_timed_out();
+            tracing::warn!("grace period expired, forcing shutdown");
+        }
+    }
+
     discovery.withdraw(&cli.node_id).await?;
     registry.shutdown().await?;
 
-    tracing::info!("shutdown complete");
+    tracing::info!(shutdown_state = ?shutdown_state.snapshot(), "shutdown complete");
     Ok(())
 }
