@@ -207,6 +207,7 @@ type Gateway struct {
 	logger    *log.Logger
 	startedAt time.Time
 	health    atomic.Value
+	draining  atomic.Value
 	mu        sync.RWMutex
 	routes    []Route
 	middleware []MiddlewareFunc
@@ -340,6 +341,7 @@ func (g *Gateway) registerDefaultRoutes() {
 	g.mux.HandleFunc("/health", g.handleHealth())
 	g.mux.HandleFunc("/health/ready", g.handleReadiness())
 	g.mux.HandleFunc("/health/live", g.handleLiveness())
+	g.mux.HandleFunc("/health/drain", g.handleDrain())
 
 	// Metrics
 	if g.config.EnableMetrics {
@@ -547,13 +549,52 @@ func (g *Gateway) handleReadiness() http.HandlerFunc {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
 		}
+		if g.IsDraining() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	}
+}
+
+func (g *Gateway) IsDraining() bool {
+	return g.draining.Load() != nil && g.draining.Load().(bool)
+}
+
+func (g *Gateway) SetDraining(draining bool) {
+	g.draining.Store(draining)
+	if draining {
+		g.logger.Println("gateway marked as draining, readiness will return 503")
+	} else {
+		g.logger.Println("gateway draining cleared, readiness restored")
 	}
 }
 
 func (g *Gateway) handleLiveness() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+	}
+}
+
+func (g *Gateway) handleDrain() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			// Return current draining status
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"draining": g.IsDraining(),
+			})
+		case http.MethodPost:
+			// Mark as draining
+			g.SetDraining(true)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "draining started"})
+		case http.MethodDelete:
+			// Clear draining (return to normal)
+			g.SetDraining(false)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "draining cleared"})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		}
 	}
 }
 
