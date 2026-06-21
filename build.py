@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import re
 import datetime
 import getpass
 import json
@@ -521,6 +522,101 @@ def collect_system_info() -> str:
     return "\n".join(lines)
 
 
+
+def diagnostic_retention_report() -> dict:
+    """Print a machine-readable diagnostic retention summary.
+
+    Shows which artifacts belong to the current commit (retained) and
+    which older artifacts are stale (eligible for cleanup).
+
+    Returns a dict with:
+      - current_commit: the HEAD commit of this repo
+      - current_artifacts: list of artifacts for the current commit
+      - stale_artifacts: list of artifacts from older commits
+      - total_count, current_count, stale_count
+    """
+    if not DIAGNOSTIC_DIR.exists():
+        return {
+            "current_commit": current_commit_id(),
+            "current_artifacts": [],
+            "stale_artifacts": [],
+            "total_count": 0,
+            "current_count": 0,
+            "stale_count": 0,
+            "message": "diagnostic/ directory does not exist",
+        }
+
+    current = current_commit_id()
+    all_artifacts: list[dict] = []
+
+    # Match build-XXXXXXXX.json and build-XXXXXXXX.logd and build-XXXXXXXX-partNNN.logd
+    for path in sorted(DIAGNOSTIC_DIR.iterdir()):
+        name = path.name
+        m = re.match(r"^build-([0-9a-f]{8})(?:-part\d+)?\.(json|logd)$", name)
+        if not m:
+            continue
+        commit = m.group(1)
+        ext = m.group(2)
+        artifact = {
+            "filename": name,
+            "commit": commit,
+            "type": ext,
+            "size_bytes": path.stat().st_size,
+            "is_current": commit == current,
+            "is_chunk": "-part" in name,
+        }
+        all_artifacts.append(artifact)
+
+    current_artifacts = [a for a in all_artifacts if a["is_current"]]
+    stale_artifacts = [a for a in all_artifacts if not a["is_current"]]
+
+    return {
+        "current_commit": current,
+        "current_artifacts": current_artifacts,
+        "stale_artifacts": stale_artifacts,
+        "total_count": len(all_artifacts),
+        "current_count": len(current_artifacts),
+        "stale_count": len(stale_artifacts),
+        "message": "ok",
+    }
+
+
+def diagnostic_stale_cleanup(dry_run: bool = True) -> dict:
+    """Report or remove stale diagnostic artifacts.
+
+    A stale artifact is one whose commit does not match the current HEAD.
+    If dry_run=True, only reports what would be deleted without deleting.
+    If dry_run=False, actually deletes the stale artifacts.
+
+    Returns a dict with:
+      - dry_run: whether this was a dry run
+      - stale_artifacts: list of stale files found
+      - deleted_count: number of files deleted (0 if dry_run)
+      - total_freed_bytes: bytes freed
+    """
+    report = diagnostic_retention_report()
+    stale = report["stale_artifacts"]
+    deleted = []
+    freed_bytes = 0
+
+    for artifact in stale:
+        path = DIAGNOSTIC_DIR / artifact["filename"]
+        if not path.exists():
+            continue
+        if not dry_run:
+            path.unlink()
+        deleted.append(artifact["filename"])
+        freed_bytes += artifact["size_bytes"]
+
+    return {
+        "dry_run": dry_run,
+        "stale_artifacts": stale,
+        "deleted_count": 0 if dry_run else len(deleted),
+        "freed_bytes": freed_bytes,
+        "message": "dry-run complete" if dry_run else f"deleted {len(deleted)} stale artifacts",
+    }
+
+
 def build_diagnostic_report(
     results: list[tuple[str, bool, float, str, Optional[str]]],
     commit_id: str,
@@ -816,7 +912,58 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
           f"{total_time:.1f}s total")
 
 def main():
+    # Top-level parser for subcommands
+    root_parser = argparse.ArgumentParser(prog="build.py")
+    sub = root_parser.add_subparsers(dest="command", help="Available commands")
+
+    # retention-report command
+    p_retention = sub.add_parser("retention-report", help="Show diagnostic retention summary (current vs stale artifacts)")
+    p_retention.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # stale-cleanup command
+    p_cleanup = sub.add_parser("stale-cleanup", help="Remove stale diagnostic artifacts")
+    p_cleanup.add_argument("--execute", action="store_true", help="Actually delete files (default is dry-run)")
+    p_cleanup.add_argument("--json", action="store_true", help="Output as JSON")
+
+    args = root_parser.parse_args()
+
+    # Handle subcommands
+    if args.command == "retention-report":
+        report = diagnostic_retention_report()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"\nDiagnostic Retention Report")
+            print(f"  Current commit: {report['current_commit']}")
+            print(f"  Total artifacts: {report['total_count']}")
+            print(f"  Current commit artifacts: {report['current_count']}")
+            print(f"  Stale artifacts: {report['stale_count']}")
+            if report["stale_artifacts"]:
+                print(f"\n  Stale artifacts (not belonging to current commit):")
+                for a in report["stale_artifacts"]:
+                    size_kb = a["size_bytes"] // 1024
+                    print(f"    {a['filename']} ({size_kb}KB, commit={a['commit'][:8]})")
+            else:
+                print(f"\n  No stale artifacts found.")
+        return 0
+
+    if args.command == "stale-cleanup":
+        result = diagnostic_stale_cleanup(dry_run=not args.execute)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"\nDiagnostic Stale Cleanup")
+            print(f"  Mode: {'DRY-RUN' if result['dry_run'] else 'EXECUTE'}")
+            print(f"  Stale artifacts found: {len(result['stale_artifacts'])}")
+            print(f"  Would free: {result['freed_bytes'] // 1024}KB")
+            if not result["dry_run"]:
+                print(f"  Deleted: {result['deleted_count']} files")
+        return 0
+
+    # Fall through to original behavior when no subcommand given
     parser = argparse.ArgumentParser(
+        prog="build.py",
+
         description="Tent of Trials  -  Multi-Language Build System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -827,6 +974,9 @@ Examples:
   python3 build.py --clean            Clean all artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
+  python3 build.py retention-report    Show diagnostic retention summary
+  python3 build.py stale-cleanup      Show stale diagnostic artifacts (dry-run)
+  python3 build.py stale-cleanup --execute  Delete stale diagnostic artifacts
 
 Diagnostic bundle:
   python3 build.py
