@@ -276,6 +276,45 @@ Audit logs are retained for 365 days and include:
 | Penetration test | Quarterly | External vendor |
 | Compliance audit | Annually | External auditor |
 
+## Diagnostic Retention Report
+
+Use `--diagnostic-report` to view a machine-readable summary of all diagnostic artifacts:
+
+```bash
+python3 build.py --diagnostic-report
+```
+
+Example output:
+```json
+{
+  "current_artifacts": [
+    {"name": "build-a1b2c3d4.logd", "size": 1024, "path": "diagnostic/build-a1b2c3d4.logd"}
+  ],
+  "older_artifacts": [
+    {"name": "build-00000000.logd", "size": 512, "path": "diagnostic/build-00000000.logd"}
+  ],
+  "total_count": 2,
+  "total_bytes": 1536
+}
+```
+
+The command is read-only and safe to run in CI pipelines. It will never modify or delete files.
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `current_artifacts` | array | Artifacts belonging to the current `HEAD` commit |
+| `older_artifacts` | array | Artifacts from previous commits |
+| `total_count` | integer | Total number of diagnostic artifacts |
+| `total_bytes` | integer | Total disk space used by all diagnostic artifacts |
+
+Each artifact entry contains:
+- `name` -- file name
+- `size` -- file size in bytes
+- `path` -- relative path from the project root
+
+
 ## Troubleshooting
 
 ### Common Issues

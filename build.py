@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""Build orchestration for Tent of Trials. Compiles all modules and generates diagnostic artifacts.
-"""
-
 
 import argparse
 import datetime
@@ -118,6 +115,22 @@ MODULES = [
         build_dir=ROOT / "frailbox" / "frailbox",
     ),
     Module(
+        name="frailbox-logger",
+        language="C",
+        dir=ROOT / "frailbox",
+        build_cmd=["make", "test-logger-shutdown"],
+        clean_cmd=["make", "clean"],
+        build_dir=ROOT / "frailbox" / "build" / "tests" / "test_logger_shutdown",
+    ),
+    Module(
+        name="frailbox-connector",
+        language="C",
+        dir=ROOT / "frailbox",
+        build_cmd=["make", "test-connector-wait-all"],
+        clean_cmd=["make", "clean"],
+        build_dir=ROOT / "frailbox" / "build" / "tests" / "test_connector_wait_all",
+    ),
+    Module(
         name="engine",
         language="C++",
         dir=ROOT / "frailbox" / "engine",
@@ -150,6 +163,18 @@ MODULES = [
         build_dir=None,
     ),
     Module(
+        name="nfc-scanner-checksums",
+        language="Lua",
+        dir=ROOT / "frailbox" / "nfc",
+        build_cmd=[
+            "sh",
+            "-c",
+            "luac -p scanner.lua test_scanner_checksums.lua && lua test_scanner_checksums.lua",
+        ],
+        clean_cmd=["echo", "Lua has no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="openapi-haskell",
         language="Haskell",
         dir=ROOT / "docs" / "openapi",
@@ -163,6 +188,14 @@ MODULES = [
         dir=ROOT / "tools",
         build_cmd=["luac", "-p", "openapi_diff.lua", "openapi_mock.lua", "openapi_pact.lua"],
         clean_cmd=["echo", "Nothing to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="legacy-migration",
+        language="Python",
+        dir=ROOT / "tools",
+        build_cmd=["python3", "test_legacy_migration_dry_run.py"],
+        clean_cmd=["echo", "Python has no build artifacts to clean"],
         build_dir=None,
     ),
 ]
@@ -595,6 +628,60 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
     return True
 
 
+def get_retention_report(diagnostic_dir: Optional[Path] = None) -> dict:
+    """Return a diagnostic artifact retention report.
+    
+    Scans the diagnostic directory and reports current and older artifacts
+    without modifying any files. Safe to run in CI.
+    
+    Returns:
+        dict with keys: current_artifacts, older_artifacts, total_count, total_bytes
+    """
+    diagnostic_dir = diagnostic_dir or DIAGNOSTIC_DIR
+    commit_id = current_commit_id()
+    current_artifacts = []
+    older_artifacts = []
+    total_count = 0
+    total_bytes = 0
+
+    if not diagnostic_dir.exists():
+        return {
+            "current_artifacts": [],
+            "older_artifacts": [],
+            "total_count": 0,
+            "total_bytes": 0,
+        }
+
+    for item in sorted(diagnostic_dir.iterdir()):
+        if not item.is_file():
+            continue
+        name = item.name
+        if not name.startswith("build-"):
+            continue
+        total_count += 1
+        size = item.stat().st_size
+        total_bytes += size
+
+        entry = {
+            "name": name,
+            "size": size,
+            "path": str(item.relative_to(diagnostic_dir.parent)),
+        }
+
+        if commit_id in name:
+            current_artifacts.append(entry)
+        else:
+            older_artifacts.append(entry)
+
+    return {
+        "current_artifacts": current_artifacts,
+        "older_artifacts": older_artifacts,
+        "total_count": total_count,
+        "total_bytes": total_bytes,
+    }
+
+
+
 def generate_logd(
     results: list[tuple[str, bool, float, str, Optional[str]]],
     verbose: bool = False,
@@ -817,6 +904,11 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--diagnostic-report", action="store_true",
+        help="Print diagnostic artifact retention report as JSON and exit",
+    )
+
 
     args = parser.parse_args()
 
@@ -856,6 +948,11 @@ Diagnostic bundle:
 
     if not selected:
         print(f"  No modules selected.")
+        return 0
+
+        if args.diagnostic_report:
+        report = get_retention_report()
+        print(json.dumps(report, indent=2))
         return 0
 
     if args.clean:
