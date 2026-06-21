@@ -1,21 +1,29 @@
  ```diff
 --- a/tools/data_generator.py
 +++ b/tools/data_generator.py
-@@ -1,4 +1,5 @@
- #!/usr/bin/env python3
-+
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python3
  """
  Legacy test data generator for development and testing environments.
  Generates realistic-looking market data, orders, trades, and user data
-@@ -19,6 +20,7 @@
+@@ -18,6 +18,7 @@
  import csv
  import json
  import math
-+import functools
++import math
  import os
  import random
  import sys
-@@ -96,7 +98,7 @@
+@@ -26,6 +27,7 @@
+ from typing import Any, Dict, List, Optional, Tuple
+ 
+ # ---------------------------------------------------------------------------
++# ---------------------------------------------------------------------------
+ # CONSTANTS
+ # ---------------------------------------------------------------------------
+ 
+@@ -87,7 +89,7 @@
  DOMAINS = ["example.com", "test.org", "demo.net", "sample.io", "mock.dev",
             "fictitious.co", "imaginary.app", "pretend.tech", "dummy.biz",
             "simulated.com", "testmail.com", "inbox.test"]
@@ -23,138 +31,117 @@
 -de
 +
  # ---------------------------------------------------------------------------
- # RNG HELPER
+ # HELPERS
  # ---------------------------------------------------------------------------
-@@ -105,7 +106,7 @@
- class SeededRandom:
-     """Wrapper around random.Random for deterministic generation."""
+@@ -96,6 +98,7 @@
+ def _random_price(base: float, volatility: float, rng: random.Random) -> float:
+     """Return a random price around base with given volatility using the provided RNG."""
+     return round(base + rng.uniform(-volatility, volatility), decimals=2)
++
  
--    def __init__(self, seed: Optional[int] = None):
-+    def __init__(self, seed=None):
-         self.rng = random.Random(seed)
+ def _random_timestamp(start: datetime, end: datetime, rng: random.Random) -> datetime:
+     """Return a random timestamp between start and end using the provided RNG."""
+@@ -103,6 +106,7 @@
+     random_seconds = rng.randint(0, int(delta.total_seconds()))
+     return start + timedelta(seconds=random_seconds)
  
-     def random(self):
-@@ -129,7 +130,7 @@ def choice(self, seq):
-     def sample(self, population, k):
-         return self.rng.sample(population, k)
- 
--    def gauss(self, mu: float = 0.0, sigma: float = 1.0):
-+    def gauss(self, mu=0.0, sigma=1.0):
-         return self.rng.gauss(mu, sigma)
- 
- 
-@@ -138,7 +139,7 @@ def gauss(self, mu: float = 0.0, sigma: float = 1.0):
++
+ def _format_timestamp(dt: datetime) -> str:
+     """Return ISO 8601 formatted timestamp string."""
+     return dt.isoformat()
+@@ -112,6 +116,7 @@ def _format_timestamp(dt: datetime) -> str:
  # ---------------------------------------------------------------------------
  
- def generate_instruments(rng, count=None):
--    """Return a list of instrument dicts, optionally limited to *count*."""
-+    """Return a list of instrument dicts, optionally limited to count."""
-     if count is None or count >= len(INSTRUMENTS):
-         return [dict(i) for i in INSTRUMENTS]
-     return [dict(i) for i in INSTRUMENTS[:count]]
-@@ -148,7 +149,7 @@ def generate_market_data(rng, instruments, count=100):
-     """Generate synthetic market data (price / volume snapshots)."""
-     data = []
-     for _ in range(count):
--        instrument = rng.choice(instruments)
-+        instrument = dict(rng.choice(instruments))
-         base_price = instrument["price"]
-         # Random walk around base price
-         price = base_price * (1 + rng.gauss(0, instrument["vol"] / 100))
-@@ -169,7 +170,7 @@ def generate_orders(rng, instruments, count=50):
-     """Generate synthetic orders."""
-     orders = []
-     for _ in range(count):
--        instrument = rng.choice(instruments)
-+        instrument = dict(rng.choice(instruments))
-         side = rng.choice(ORDER_SIDES)
-         order_type = rng.choice(ORDER_TYPES)
-         status = rng.choice(ORDER_STATUSES)
-@@ -196,7 +197,7 @@ def generate_trades(rng, instruments, count=50):
-     """Generate synthetic trades."""
-     trades = []
-     for _ in range(count):
--        instrument = rng.choice(instruments)
-+        instrument = dict(rng.choice(instruments))
-         side = rng.choice(ORDER_SIDES)
-         base_price = instrument["price"]
-         price = base_price * (1 + rng.gauss(0, instrument["vol"] / 200))
-@@ -219,7 +220,7 @@ def generate_trades(rng, instruments, count=50):
- def generate_users(rng, count=20):
-     """Generate synthetic user records."""
-     users = []
--    for i in range(count):
-+    for _ in range(count):
-         first = rng.choice(FIRST_NAMES)
-         last = rng.choice(LAST_NAMES)
-         username = f"{first.lower()}.{last.lower()}{rng.randint(1, 999)}"
-@@ -243,7 +244,7 @@ def generate_users(rng, count=20):
- def write_json(data, filepath):
-     """Write *data* to *filepath* as JSON."""
-     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
--    with open(filepath, "w", encoding="utf-8") as f:
-+    with open(filepath, "w", encoding="utf-8") as f:  # noqa: P201
-         json.dump(data, f, indent=2, default=str)
-     return filepath
+ class DataGenerator:
++
+     def __init__(self, seed: Optional[int] = None):
+         self.seed = seed if seed is not None else int(time.time())
+         self.rng = random.Random(self.seed)
+@@ -123,7 +128,7 @@ def _generate_id(self, prefix: str = "id") -> str:
+     def generate_instruments(self, count: Optional[int] = None) -> List[Dict[str, Any]]:
+         """Generate instrument data. If count is None, use default INSTRUMENTS."""
+         if count is None:
+-            return [dict(inst) for inst in INSTRUMENTS]
++            return [dict(inst) for inst in INSTRUMENTS]
+         # Generate synthetic instruments if count specified
+         instruments = []
+         for i in range(count):
+@@ -140,7 +145,7 @@ def generate_instruments(self, count: Optional[int] = None) -> List[Dict[str, Any
+                 "lot_size": lot_size,
+                 "price": round(price, 2),
+                 "vol": round(vol, 2),
+-            })
++            })
+         return instruments
  
-@@ -251,7 +252,7 @@ def write_json(data, filepath):
- def write_csv(data, filepath):
-     """Write *data* to *filepath* as CSV (flattened)."""
-     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
--    with open(filepath, "w", newline="", encoding="utf-8") as f:
-+    with open(filepath, "w", newline="", encoding="utf-8") as f:  # noqa: P201
-         if not data:
-             return filepath
-         writer = csv.DictWriter(f, fieldnames=data[0].keys())
-@@ -264,7 +265,7 @@ def write_csv(data, filepath):
+     def generate_orders(self, count: int, instruments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+@@ -148,7 +153,7 @@ def generate_orders(self, count: int, instruments: List[Dict[str, Any]]) -> List[D
+         orders = []
+         now = datetime.now(timezone.utc)
+         for i in range(count):
+-            inst = instruments[random.randrange(len(instruments))]
++            inst = instruments[self.rng.randrange(len(instruments))]
+             side = self.rng.choice(ORDER_SIDES)
+             order_type = self.rng.choice(ORDER_TYPES)
+             status = self.rng.choice(ORDER_STATUSES)
+@@ -175,7 +180,7 @@ def generate_orders(self, count: int, instruments: List[Dict[str, Any]]) -> List
+     def generate_trades(self, count: int, instruments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+         """Generate trade data."""
+         trades = []
+-        now = datetime.now(timezone.utc)
++        now = datetime.now(timezone.utc)
+         for i in range(count):
+             inst = instruments[self.rng.randrange(len(instruments))]
+             side = self.rng.choice(ORDER_SIDES)
+@@ -195,7 +200,7 @@ def generate_trades(self, count: int, instruments: List[Dict[str, Any]]) -> List[
+     def generate_users(self, count: int) -> List[Dict[str, Any]]:
+         """Generate user data."""
+         users = []
+-        now = datetime.now(timezone.utc)
++        now = datetime.now(timezone.utc)
+         for i in range(count):
+             first = self.rng.choice(FIRST_NAMES)
+             last = self.rng.choice(LAST_NAMES)
+@@ -216,7 +221,7 @@ def generate_users(self, count: int) -> List[Dict[str, Any]]:
+ 
  # ---------------------------------------------------------------------------
+ # OUTPUT FORMATTERS
+-# ---------------------------------------------------------------------------
++# ---------------------------------------------------------------------------
  
- def parse_args(argv=None):
--    parser = argparse.ArgumentParser(description="Generate synthetic market data.")
-+    parser = argparse.ArgumentParser(description="Generate synthetic market data.")
-     parser.add_argument(
-         "--seed",
-         type=int,
-@@ -275,6 +276,7 @@ def parse_args(argv=None):
-         "--output-dir",
-         "-o",
-         default="data",
-+        dest="output_dir",
-         help="Directory to write generated files (default: data)",
-     )
-     parser.add_argument(
-@@ -282,6 +284,7 @@ def parse_args(argv=None):
-         type=int,
-         default=100,
-         metavar="N",
-+        dest="market_count",
-         help="Number of market data points to generate (default: 100)",
-     )
-     parser.add_argument(
-@@ -289,6 +292,7 @@ def parse_args(argv=None):
-         type=int,
-         default=50,
-         metavar="N",
-+        dest="order_count",
-         help="Number of orders to generate (default: 50)",
-     )
-     parser.add_argument(
-@@ -296,6 +300,7 @@ def parse_args(argv=None):
-         type=int,
-         default=50,
-         metavar="N",
-+        dest="trade_count",
-         help="Number of trades to generate (default: 50)",
-     )
-     parser.add_argument(
-@@ -303,6 +308,7 @@ def parse_args(argv=None):
-         type=int,
-         default=20,
-         metavar="N",
-+        dest="user_count",
-         help="Number of users to generate (default: 20)",
-     )
-     parser.add_argument(
-@@ -310,6 +316,7 @@ def parse_args(argv=None):
-         choices=["json", "csv", "both"],
-         default="
+ def write_json(data: List[Dict[str, Any]], path: str) -> None:
+     """Write data to JSON file."""
+@@ -230,7 +235,7 @@ def write_csv(data: List[Dict[str, Any]], path: str) -> None:
+     if not data:
+         return
+     keys = list(data[0].keys())
+-    with open(path, "w", newline="") as f:
++    with open(path, "w", newline="", encoding="utf-8") as f:
+         writer = csv.DictWriter(f, fieldnames=keys)
+         writer.writeheader()
+         writer.writerows(data)
+@@ -239,7 +244,7 @@ def write_csv(data: List[Dict[str, Any]], path: str) -> None:
+ # ---------------------------------------------------------------------------
+ # ARGUMENT PARSING
+ # ---------------------------------------------------------------------------
+-
++
+ def positive_int(value: str) -> int:
+     """Validate that value is a non-negative integer."""
+     try:
+@@ -249,7 +254,7 @@ def positive_int(value: str) -> int:
+     if ivalue < 0:
+         raise argparse.ArgumentTypeError(f"{value} is an invalid non-negative int value")
+     return ivalue
+-
++
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(
+         description="Generate synthetic market data for development and testing."
+@@ -260,8 +265,6 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--users", type=positive_int, default=10, help="Number of users to generate")
+     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+     parser.add_argument("--output-dir", type=str, default="data", help="Output directory for generated files")
+-    parser.add_argument("--json", action="store_true", help="Output JSON format")
+-    parser.add_argument("--csv", action="store_true", help="Output CSV format")
+     parser.add_argument("--format", type=str, default="json", choices=["json", "csv", "both
