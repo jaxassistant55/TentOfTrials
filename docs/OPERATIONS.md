@@ -37,6 +37,31 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Readiness Check Endpoint
+
+The Market Gateway exposes a readiness check at `/readiness` to indicate if it is healthy and ready to accept traffic.
+
+Example request:
+```bash
+curl -i http://localhost:8080/readiness
+```
+
+Expected response (when healthy):
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"ready"}
+```
+
+Expected response (when shutting down or degraded):
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"status":"not ready"}
+```
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
