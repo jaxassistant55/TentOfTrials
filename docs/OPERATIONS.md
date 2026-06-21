@@ -58,6 +58,17 @@ Key metrics to monitor:
 | `goroutine_count` | Gauge | Go routine count | > 5000 | > 10000 |
 | `gc_pause_time_ms` | Histogram | GC pause time | > 100ms | > 500ms |
 
+### Frontend Metrics
+
+The frontend application tracks internal WebSocket connection metrics for client-side diagnostics and debugging:
+
+| Metric Field | Type | Description |
+|--------------|------|-------------|
+| `reconnectAttempt` | Integer | Current number of consecutive reconnection attempts |
+| `lastDisconnectReason` | String | Reason string or status code from the last connection drop |
+| `lastConnectedAt` | Timestamp | Epoch timestamp (ms) of the last successful connection |
+| `latencyMs` | Integer | Current ping/pong latency in milliseconds |
+
 ### Grafana Dashboards
 
 Pre-built Grafana dashboards are available:

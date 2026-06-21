@@ -74,6 +74,8 @@ export interface WSState {
   totalMessagesReceived: number;
   errors: number;
   latencyMs: number | null;
+  lastDisconnectReason: string | null;
+  lastConnectedAt: number | null;
 }
 
 interface QueuedMessage {
@@ -118,6 +120,8 @@ export function useWebSocket(options: WSOptions) {
     totalMessagesReceived: 0,
     errors: 0,
     latencyMs: null,
+    lastDisconnectReason: null,
+    lastConnectedAt: null,
   });
 
   const updateState = useCallback((partial: Partial<WSState>) => {
@@ -186,7 +190,7 @@ export function useWebSocket(options: WSOptions) {
       ws.onopen = (event) => {
         if (!mountedRef.current) return;
         reconnectAttemptRef.current = 0;
-        updateState({ connectionState: 'connected', reconnectAttempt: 0 });
+        updateState({ connectionState: 'connected', reconnectAttempt: 0, lastConnectedAt: Date.now() });
 
         // Resubscribe to all channels
         subscriptionsRef.current.forEach((sub, channel) => {
@@ -256,19 +260,22 @@ export function useWebSocket(options: WSOptions) {
         if (!mountedRef.current) return;
         wsRef.current = null;
         stopPing();
-        updateState({ connectionState: 'disconnected' });
+        updateState({ 
+          connectionState: 'disconnected',
+          lastDisconnectReason: event.reason || `Code: ${event.code}`
+        });
         mergedOptions.onClose?.(event);
         scheduleReconnect();
       };
 
       ws.onerror = (event) => {
         if (!mountedRef.current) return;
-        updateState(prev => ({ ...prev, errors: prev.errors + 1, connectionState: 'error' }));
+        updateState(prev => ({ ...prev, errors: prev.errors + 1, connectionState: 'error', lastDisconnectReason: 'WebSocket Error' }));
         mergedOptions.onError?.(event);
       };
     } catch (err) {
       if (!mountedRef.current) return;
-      updateState(prev => ({ ...prev, errors: prev.errors + 1, connectionState: 'error' }));
+      updateState(prev => ({ ...prev, errors: prev.errors + 1, connectionState: 'error', lastDisconnectReason: err instanceof Error ? err.message : String(err) }));
       if (mergedOptions.debug) {
         console.error('[WS] Connection error:', err);
       }
@@ -276,17 +283,17 @@ export function useWebSocket(options: WSOptions) {
     }
   }, [mergedOptions, sendMessage, updateState, state.totalMessagesReceived]);
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback((reason: string = 'Client disconnect') => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
-      wsRef.current.close(1000, 'Client disconnect');
+      wsRef.current.close(1000, reason);
       wsRef.current = null;
     }
     stopPing();
-    updateState({ connectionState: 'disconnected', reconnectAttempt: 0 });
+    updateState({ connectionState: 'disconnected', reconnectAttempt: 0, lastDisconnectReason: reason });
   }, [updateState]);
 
   const scheduleReconnect = useCallback(() => {
