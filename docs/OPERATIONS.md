@@ -37,6 +37,20 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Graceful Shutdown and Draining
+
+The market gateway supports a "draining" state to allow for clean shutdowns or deployments without dropping active connections.
+
+When draining, the gateway returns a `503 Service Unavailable` response on the readiness endpoint (`/health/ready`), indicating to load balancers (like Kubernetes) that it should no longer receive new traffic. However, the liveness endpoint (`/health/live`) continues to return `200 OK`, ensuring the process is not killed prematurely while finishing in-flight requests.
+
+To toggle the draining state, send a POST request to the admin drain endpoint:
+
+```bash
+curl -X POST http://localhost:8080/admin/drain
+```
+
+The endpoint will return `{"status": "draining"}` or `{"status": "ready"}` depending on the new state.
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the

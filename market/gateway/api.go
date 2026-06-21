@@ -39,7 +39,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -49,7 +48,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,6 +207,7 @@ type Gateway struct {
 	logger    *log.Logger
 	startedAt time.Time
 	health    atomic.Value
+	draining  atomic.Value
 	mu        sync.RWMutex
 	routes    []Route
 	middleware []MiddlewareFunc
@@ -254,8 +253,10 @@ func NewGateway(config GatewayConfig) *Gateway {
 		logger:      log.New(os.Stdout, "[gateway] ", log.LstdFlags),
 		startedAt:   time.Now(),
 		health:      atomic.Value{},
+		draining:    atomic.Value{},
 	}
 	g.health.Store(true)
+	g.draining.Store(false)
 	g.registerDefaultRoutes()
 	g.registerDefaultMiddleware()
 	return g
@@ -313,6 +314,15 @@ func (g *Gateway) Health() bool {
 	return ok && val
 }
 
+func (g *Gateway) IsDraining() bool {
+	val, ok := g.draining.Load().(bool)
+	return ok && val
+}
+
+func (g *Gateway) SetDraining(status bool) {
+	g.draining.Store(status)
+}
+
 func (g *Gateway) Stats() GatewayMetrics {
 	g.metrics.mu.Lock()
 	defer g.metrics.mu.Unlock()
@@ -347,6 +357,9 @@ func (g *Gateway) registerDefaultRoutes() {
 	if g.config.EnableMetrics {
 		g.mux.HandleFunc("/metrics", g.handleMetrics())
 	}
+
+	// Admin routes
+	g.mux.HandleFunc("/admin/drain", g.handleAdminDrain())
 
 	// API routes
 	g.mux.HandleFunc("/api/v1/market/instruments", g.handleGetInstruments())
@@ -545,11 +558,34 @@ func (g *Gateway) handleHealth() http.HandlerFunc {
 
 func (g *Gateway) handleReadiness() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if g.IsDraining() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+			return
+		}
 		if !g.Health() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	}
+}
+
+func (g *Gateway) handleAdminDrain() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		
+		// Toggle the draining state
+		newState := !g.IsDraining()
+		g.SetDraining(newState)
+		
+		stateStr := "draining"
+		if !newState {
+			stateStr = "ready"
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": stateStr})
 	}
 }
 
