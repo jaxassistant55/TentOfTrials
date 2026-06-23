@@ -891,6 +891,32 @@ Diagnostic bundle:
         print(f"  No modules selected.")
         return 0
 
+
+    if args.dry_run:
+        diag_dir = ROOT / "diagnostic"
+        if diag_dir.exists():
+            stale = []
+            for f in diag_dir.iterdir():
+                if f.is_file() and (f.suffix in (".logd", ".json") or f.name.startswith("build-")):
+                    try:
+                        mtime = f.stat().st_mtime
+                        age = (datetime.now() - datetime.fromtimestamp(mtime)).days
+                    except:
+                        age = -1
+                    stale.append((f.name, age))
+            stale.sort(key=lambda x: x[0])
+            if stale:
+                print("  Stale diagnostic artifacts in " + str(diag_dir) + ":")
+                for name, age in stale:
+                    age_str = "today" if age <= 0 else str(age) + "d ago"
+                    print("    " + name + " (" + age_str + ")")
+                print("  Total: " + str(len(stale)) + " files. Use --clean to remove.")
+            else:
+                print("  No stale artifacts in " + str(diag_dir))
+        else:
+            print("  Diagnostic directory " + str(diag_dir) + " not found")
+        return 0
+
     if args.clean:
         print(f"\n  {color('Cleaning build artifacts...', Colors.YELLOW)}")
         for module in selected:
