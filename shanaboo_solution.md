@@ -1,127 +1,183 @@
  ```diff
---- a/frontend/src/components/OrderBook.tsx
-+++ b/frontend/src/components/OrderBook.tsx
-@@ -1,4 +1,4 @@
--import React, { useMemo, useState, useCallback } from 'react';
-+import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
+--- a/market/analytics/collector.go
++++ b/market/analytics/collector.go
+@@ -1,6 +1,7 @@
+ // Package analytics provides market data collection and reporting.
+ // WARNING: This package is legacy. Do NOT add new features here. The
+ // replacement is in the `analytics-v2` package (which doesn't exist yet).
++// NOTE: Tag cardinality is now limited. See CollectorConfig.MaxTagCardinality.
+ //
+ // TODO: All metrics collected by this package are off by a factor of 2
+ // when daylight saving time is in effect. This is a known issue. The fix
+@@ -28,6 +29,12 @@
+ 	"time"
+ )
  
- // Types
- export interface OrderLevel {
-@@ -15,6 +15,10 @@ interface OrderBookProps {
-   className?: string;
++// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
++const DefaultMaxTagCardinality = 32
++
++// ErrTagCardinalityExceeded is returned when a metric sample has too many tags.
++var ErrTagCardinalityExceeded = fmt.Errorf("metric tag cardinality exceeds configured limit")
++
+ // MetricType represents the type of metric being collected.
+ // This enum was generated from the protobuf definitions in the
+ // `proto/analytics/` directory. However, the proto definitions
+@@ -262,6 +269,7 @@
+ 	flushInterval    time.Duration
+ 	outputDir        string
+ 	maxBufferSize    int
++	maxTagCardinality int
+ 	collectCPU       bool
+ 	collectMemory    bool
+ 	collectGoroutine bool
+@@ -283,6 +291,7 @@
+ 		flushInterval:    30 * time.Second,
+ 		outputDir:        "./metrics",
+ 		maxBufferSize:    10000,
++		maxTagCardinality: DefaultMaxTagCardinality,
+ 		collectCPU:       true,
+ 		collectMemory:    true,
+ 		collectGoroutine: true,
+@@ -316,6 +325,13 @@
+ 	}
  }
  
-+// Constants for virtualization
-+const ROW_HEIGHT = 32; // pixels per row
-+const VISIBLE_ROW_COUNT = 25; // number of visible rows to render
-+const OVERSCAN_COUNT = 5; // extra rows to render above/below for smooth scrolling
++// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
++func WithMaxTagCardinality(limit int) CollectorOption {
++	return func(c *CollectorConfig) {
++		c.maxTagCardinality = limit
++	}
++}
 +
- /**
-  * OrderBook Component
-  * 
-@@ -22,7 +26,8 @@ interface OrderBookProps {
-  * - Displays bid and ask levels with price, size, and total
-  * - Color-codes rows by size relative to max visible size
-  * - Supports keyboard navigation (arrow keys, home/end)
-- * - TODO: Virtualize rendering for large order books
-+ * - Virtualizes rendering for large order books to maintain performance
-+ * - Preserves accessibility semantics and visible totals
-  */
- export const OrderBook: React.FC<OrderBookProps> = ({
-   bids,
-@@ -33,6 +38,10 @@ export const OrderBook: React.FC<OrderBookProps> = ({
- }) => {
-   const [selectedIndex, setSelectedIndex] = useState<number>(-1);
-   const [focusedSide, setFocusedSide] = useState<'bids' | 'asks'>('bids');
-+  const [scrollTop, setScrollTop] = useState(0);
-+  const bidsContainerRef = useRef<HTMLDivElement>(null);
-+  const asksContainerRef = useRef<HTMLDivElement>(null);
-+  const containerRefs = useRef<{ bids: HTMLDivElement | null; asks: HTMLDivElement | null }>({ bids: null, asks: null });
+ // WithOutputDir sets the output directory for metric files.
+ func WithOutputDir(dir string) CollectorOption {
+ 	return func(c *CollectorConfig) {
+@@ -380,6 +396,7 @@
+ 	flushInterval    time.Duration
+ 	outputDir        string
+ 	maxBufferSize    int
++	maxTagCardinality int
+ 	collectCPU       bool
+ 	collectMemory    bool
+ 	collectGoroutine bool
+@@ -395,6 +412,12 @@
+ 	droppedMetrics   int64
+ }
  
-   // Sort bids descending (highest price first), asks ascending (lowest price first)
-   const sortedBids = useMemo(() => {
-@@ -48,6 +57,73 @@ export const OrderBook: React.FC<OrderBookProps> = ({
-     return sortedAsks.map((ask, index) => ({ ...ask, total: sortedAsks.slice(0, index + 1).reduce((sum, a) => sum + a.size, 0) }));
-   }, [sortedAsks]);
++// ValidationResult records the outcome of validating a metric sample.
++type ValidationResult struct {
++	Accepted bool
++	Reason   string
++}
++
+ // NewCollector creates a new metrics collector with the given options.
+ func NewCollector(opts ...CollectorOption) *Collector {
+ 	config := defaultCollectorConfig()
+@@ -410,6 +433,7 @@
+ 		flushInterval:    config.flushInterval,
+ 		outputDir:        config.outputDir,
+ 		maxBufferSize:    config.maxBufferSize,
++		maxTagCardinality: config.maxTagCardinality,
+ 		collectCPU:       config.collectCPU,
+ 		collectMemory:    config.collectMemory,
+ 		collectGoroutine: config.collectGoroutine,
+@@ -433,6 +457,24 @@
+ 	return c
+ }
  
-+  // Virtualization helpers
-+  const getVirtualRange = useCallback((itemCount: number, scrollPosition: number) => {
-+    const startIndex = Math.max(0, Math.floor(scrollPosition / ROW_HEIGHT) - OVERSCAN_COUNT);
-+    const visibleEndIndex = Math.min(
-+      itemCount,
-+      Math.ceil((scrollPosition + VISIBLE_ROW_COUNT * ROW_HEIGHT) / ROW_HEIGHT) + OVERSCAN_COUNT
-+    );
-+    const endIndex = Math.min(itemCount, visibleEndIndex);
-+    return { start signalIndex: startIndex, endIndex };
-+  }, []);
++// ValidateSample checks if a metric sample meets the collector's validation rules.
++// Returns a ValidationResult indicating acceptance or the reason for rejection.
++func (c *Collector) ValidateSample(sample MetricSample) ValidationResult {
++	c.mu.RLock()
++	limit := c.maxTagCardinality
++	c.mu.RUnlock()
 +
-+  const getVirtualStyles = useCallback((itemCount: number清算, startIndex: number, visibleCount: number) => {
-+    const totalHeight = itemCount * ROW_HEIGHT;
-+    const topHeight = startIndex * ROW_HEIGHT;
-+    const bottomHeight = Math.max(0, totalHeight - top VirtualHeight - topHeight);
-+    
-+    return {
-+      topHeight,
-+      bottomHeight,
-+      totalHeight,
-+    };
-+  }, []);
++	if len(sample.Tags) > limit {
++		return ValidationResult{
++			Accepted: false,
++			Reason:   fmt.Sprintf("tag cardinality %d exceeds limit %d", len(sample.Tags), limit),
++		}
++	}
++	return ValidationResult{
++		Accepted: true,
++		Reason:   "",
++	}
++}
 +
-+  // Handle scroll events
-+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-+    const target = e.currentTarget;
-+    const isBids = target === containerRefs.current.bids;
-+    if (isBids) {
-+      setScrollTop(target.scrollTop);
-+    } else {
-+      // For asks, we use a separate scroll state or shared - using shared for simplicity
-+      setScrollTop(target.scrollTop);
-+    }
-+  }, []);
+ // Start begins the background collection goroutines.
+ func (c *Collector) Start(ctx context.Context) error {
+ 	c.wg.Add(1)
+@@ -478,6 +520,16 @@
+ 
+ // Collect queues a metric sample for aggregation.
+ func (c *Collector) Collect(sample MetricSample) error {
++	result := c.ValidateSample(sample)
++	if !result.Accepted {
++		c.mu.Lock()
++		c.droppedMetrics++
++		c.mu.Unlock()
++		if c.config.debug {
++			fmt.Fprintf(os.Stderr, "[analytics] dropped sample: %s\n", result.Reason)
++		}
++		return fmt.Errorf("%w: %s", ErrTagCardinalityExceeded, result.Reason)
++	}
 +
-+  // Virtualized rendering for a side of the book
-+  const renderVirtualList = useCallback((
-+    items: (OrderLevel & { total: number })[],
-+    side: 'bids' | 'asks',
-+    maxSize: number
-+  ) => {
-+    const { startIndex, endIndex } = getVirtualRange(items.length, scrollTop);
-+    const visibleItems = items.slice(startIndex, endIndex);
-+    const { topHeight, bottomHeight } = getVirtualStyles(items.length, startIndex, visibleItems.length);
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 
+@@ -497,6 +549,16 @@
+ 
+ // CollectAsync queues a metric sample without blocking.
+ func (c *Collector) CollectAsync(sample MetricSample) error {
++	result := c.ValidateSample(sample)
++	if !result.Accepted {
++		c.mu.Lock()
++		c.droppedMetrics++
++		c.mu.Unlock()
++		if c.config.debug {
++			fmt.Fprintf(os.Stderr, "[analytics] dropped sample: %s\n", result.Reason)
++		}
++		return fmt.Errorf("%w: %s", ErrTagCardinalityExceeded, result.Reason)
++	}
 +
-+    return (
-+      <div
-+        style={{
-+          height: VISIBLE_ROW_COUNT * ROW_HEIGHT,
-+          overflow: 'auto',
-+          position: 'relative',
-+        }}
-+        onScroll={handleScroll}
-+        ref={side === 'bids' ? (el) => { containerRefs.current.bids = el; bidsContainerRef.current = el; } : (el) => { containerRefs.current.asks = el; asksContainerRef.current = el; }}
-+      >
-+        <div style={{ height: topHeight }} />
-+        {visibleItems.map((item, idx) => {
-+          const actualIndex = startIndex + idx;
-+          return renderRow(item, side, actualIndex, maxSize, items.length);
-+        })}
-+        <div style={{ height: bottomHeight }} />
-+      </div>
-+    );
-+  }, [scrollTop, getVirtualRange, getVirtualStyles, handleScroll]);
+ 	select {
+ 	case c.sampleChan <- sample:
+ 		return nil
+@@ -1042,6 +1104,7 @@
+ 	flushInterval    time.Duration
+ 	outputDir        string
+ 	maxBufferSize    int
++	maxTagCardinality int
+ 	collectCPU       bool
+ 	collectMemory    bool
+ 	collectGoroutine bool
+@@ -1063,6 +1126,7 @@
+ 		flushInterval:    30 * time.Second,
+ 		outputDir:        "./metrics",
+ 		maxBufferSize:    10000,
++		maxTagCardinality: DefaultMaxTagCardinality,
+ 		collectCPU:       true,
+ 		collectMemory:    true,
+ 		collectGoroutine: true,
+@@ -1086,6 +1150,13 @@
+ 	}
+ }
+ 
++// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
++func WithMaxTagCardinality(limit int) LegacyCollectorOption {
++	return func(c *LegacyCollectorConfig) {
++		c.maxTagCardinality = limit
++	}
++}
 +
-   // Calculate max size for color scaling
-   const maxBidSize = useMemo(() => Math.max(...bidsWithTotals.map(b => b.size), 1), [bidsWithTotals]);
-   const maxAskSize = useMemo(() => Math.max(...asksWithTotals.map(a => a.size), 1), [asksWithTotals]);
-@@ -56,7 +132,7 @@ export const OrderBook: React. = ({
-   const getSizeColor = useCallback((size: number, maxSize: number, side: 'bid' | 'ask') => {
-     const intensity = Math.min(size / maxSize, 1);
-     if (side === 'bid') {
--      return `rgba(0, 128, 0, ${0.1 + intensity * 0.4})`;
-+      return `rgba(0, 128, 0, ${0.1 + intensity * 0.4})`; 
-     }
-     return `rgba(255, 0, 0, ${0.1 + intensity * 0.4})`;
-   }, []);
-@@ -66,7 +142,7 @@ export const OrderBook: React.FC<OrderBookProps> = ({
-     if (e.key === 'ArrowDown') {
-       e.preventDefault();
-       setSelectedIndex
+ // WithLegacyOutputDir sets the output directory for metric files.
+ func WithLegacyOutputDir(dir string) LegacyCollectorOption {
+ 	return func(c *LegacyCollectorConfig) {
+@@ -1138,6 +1209,7 @@
+ 	flushInterval    time.Duration
+ 	outputDir        string
+ 	maxBufferSize    int
++	maxTagCardinality int
+ 	collectCPU       bool
+ 	collectMemory    bool
+ 	collectGoroutine bool
