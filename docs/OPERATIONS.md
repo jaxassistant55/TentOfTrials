@@ -310,3 +310,35 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Shutdown Metrics
+
+The backend exposes a shutdown metrics snapshot through the `ShutdownMetricsSnapshot` struct
+(defined in `backend/src/shutdown.rs`). This snapshot provides visibility into the graceful
+shutdown process without exposing request bodies, secrets, or other sensitive data.
+
+### Shutdown Metrics Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `shutdown_started` | `bool` | Whether the shutdown signal (SIGTERM or SIGINT) has been received and shutdown has begun. `false` during normal operation. |
+| `grace_period_seconds` | `u64` | The configured grace period in seconds. This is the maximum time the server will wait for in-flight requests to complete before force-closing connections. |
+| `elapsed_seconds` | `f64` | Seconds elapsed since shutdown began. Returns `0.0` before shutdown starts. Once shutdown is initiated, this value increases in real time. |
+| `terminal_status` | `ShutdownTerminalStatus` | The terminal state of the shutdown process. One of `not_started`, `draining`, `completed`, or `timed_out`. |
+
+### Terminal Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `not_started` | The server is running normally; no shutdown signal has been received. |
+| `draining` | Shutdown has been initiated and the server is draining in-flight connections within the grace period. |
+| `completed` | All in-flight connections completed gracefully within the grace period. |
+| `timed_out` | The grace period elapsed before all connections drained; remaining connections were force-closed. |
+
+### Usage
+
+The `ShutdownMetrics` struct is constructed with a grace period value and shared across the
+application. On receiving a shutdown signal, call `begin_shutdown()` to transition to the
+`draining` state. After draining completes, call `mark_completed()`. If the grace period
+expires before draining finishes, call `mark_timed_out()`. At any point, `snapshot()` returns
+a `ShutdownMetricsSnapshot` suitable for logging, health checks, or serialization.
