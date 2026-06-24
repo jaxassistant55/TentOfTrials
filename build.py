@@ -69,6 +69,90 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
     return chunks
 
 
+def find_stale_diagnostic_artifacts(
+    diagnostic_dir: Path,
+    current_commit_id: str,
+) -> list[Path]:
+    """Return diagnostic artifacts that do NOT belong to the current commit.
+
+    Scans ``diagnostic_dir`` for files matching the standard naming patterns
+    (``build-XXXXXXXX.logd``, ``build-XXXXXXXX-partNNN.logd``,
+    ``build-XXXXXXXX.json``) and returns those whose embedded commit ID
+    differs from *current_commit_id*.
+
+    This is a read-only operation -- nothing is deleted.
+    """
+    if not diagnostic_dir.exists():
+        return []
+
+    stale: list[Path] = []
+    for entry in sorted(diagnostic_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name
+        # Match build-XXXXXXXX.logd, build-XXXXXXXX-partNNN.logd, build-XXXXXXXX.json
+        if name.startswith("build-") and (
+            name.endswith(".logd") or name.endswith(".json")
+        ):
+            # Extract the 8-char commit id after "build-"
+            # For "build-ec966bc5.logd" -> "ec966bc5"
+            # For "build-ec966bc5-part001.logd" -> "ec966bc5"
+            # For "build-ec966bc5.json" -> "ec966bc5"
+            suffix = name[len("build-"):]
+            commit_part = suffix.split("-")[0]  # handles both with and without -part
+            if len(commit_part) == 8 and all(c in "0123456789abcdef" for c in commit_part):
+                if commit_part != current_commit_id:
+                    stale.append(entry)
+    return stale
+
+
+def run_diagnostic_cleanup(
+    diagnostic_dir: Path,
+    current_commit_id: str,
+    force: bool = False,
+) -> int:
+    """List (dry-run) or delete (force) stale diagnostic artifacts.
+
+    Returns the number of stale artifacts found (or deleted when *force* is
+    True).  Current-commit artifacts are never removed.
+    """
+    stale = find_stale_diagnostic_artifacts(diagnostic_dir, current_commit_id)
+
+    if not stale:
+        print(f"  {color('✓', Colors.GREEN)} No stale diagnostic artifacts found.")
+        return 0
+
+    mode_label = "DELETING" if force else "WOULD DELETE (dry-run)"
+    mode_color = Colors.RED if force else Colors.YELLOW
+    print(f"\n  {color(mode_label, mode_color)} {len(stale)} stale diagnostic artifact(s):")
+
+    total_bytes = 0
+    for artifact in stale:
+        try:
+            size = artifact.stat().st_size
+            total_bytes += size
+            size_str = f"{size / 1024:.1f} KiB" if size < 1024 * 1024 else f"{size / (1024 * 1024):.1f} MiB"
+        except OSError:
+            size_str = "unknown size"
+        rel = artifact.relative_to(ROOT) if artifact.is_relative_to(ROOT) else artifact
+        print(f"    {color('▸', mode_color)} {rel} ({size_str})")
+
+    total_str = f"{total_bytes / 1024:.1f} KiB" if total_bytes < 1024 * 1024 else f"{total_bytes / (1024 * 1024):.1f} MiB"
+    print(f"\n  Total space that {'would be freed' if not force else 'freed'}: {total_str}")
+
+    if not force:
+        print(f"  {color('Run with --force-cleanup to actually delete these artifacts.', Colors.GRAY)}")
+    else:
+        for artifact in stale:
+            try:
+                artifact.unlink()
+            except OSError as e:
+                print(f"    {color('✗', Colors.RED)} Failed to delete {artifact.name}: {e}")
+        print(f"  {color('✓', Colors.GREEN)} Stale diagnostic artifacts deleted.")
+
+    return len(stale)
+
+
 @dataclass
 class Module:
     name: str
@@ -827,6 +911,10 @@ Examples:
 
 Diagnostic bundle:
   python3 build.py
+
+Stale diagnostic cleanup:
+  python3 build.py --diagnostic-cleanup              Dry-run: list stale artifacts
+  python3 build.py --diagnostic-cleanup --force-cleanup  Actually delete stale artifacts
         """,
     )
     parser.add_argument(
@@ -850,6 +938,16 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--diagnostic-cleanup", action="store_true",
+        help="List stale diagnostic artifacts (dry-run by default; "
+             "current commit artifacts are never removed)",
+    )
+    parser.add_argument(
+        "--force-cleanup", action="store_true",
+        help="When used with --diagnostic-cleanup, actually delete stale "
+             "artifacts instead of just listing them",
+    )
 
     args = parser.parse_args()
 
@@ -863,6 +961,17 @@ Diagnostic bundle:
             print(f"    {color(m.name, Colors.CYAN)} ({m.language})")
             print(f"      dir: {m.dir.relative_to(ROOT)}")
             print(f"      build: {' '.join(m.build_cmd)}")
+        return 0
+
+    if args.diagnostic_cleanup:
+        commit_id = current_commit_id()
+        print(f"  {color('Stale diagnostic cleanup', Colors.BOLD)}")
+        print(f"  Current commit: {commit_id}")
+        if args.force_cleanup:
+            print(f"  {color('Mode: FORCE (artifacts will be deleted)', Colors.RED)}")
+        else:
+            print(f"  {color('Mode: DRY-RUN (no files will be modified)', Colors.YELLOW)}")
+        count = run_diagnostic_cleanup(DIAGNOSTIC_DIR, commit_id, force=args.force_cleanup)
         return 0
 
     print(f"  {color('Checking prerequisites...', Colors.GRAY)}")

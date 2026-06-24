@@ -206,6 +206,98 @@ FROM pg_stat_activity
 WHERE state = 'idle' AND age > interval '1 hour';
 ```
 
+## Diagnostic Artifact Cleanup
+
+Over time, the `diagnostic/` directory accumulates build artifacts (`.logd` and
+`.json` files) from previous commits. Stale artifacts from old or interrupted
+builds can make the directory noisy and hard to audit. The build system
+provides a dedicated cleanup mode that safely identifies and optionally removes
+these stale files.
+
+### Overview
+
+Each build generates diagnostic artifacts named after the current Git commit:
+
+- `diagnostic/build-XXXXXXXX.logd` -- encrypted diagnostic log bundle
+- `diagnostic/build-XXXXXXXX-partNNN.logd` -- chunked parts of oversized logs
+- `diagnostic/build-XXXXXXXX.json` -- diagnostic metadata
+
+Artifacts whose commit ID does not match the current HEAD are considered
+**stale**. The current commit's artifacts are always preserved.
+
+### Dry-Run Mode (Default)
+
+To see which stale artifacts would be removed without actually deleting
+anything:
+
+```bash
+python3 build.py --diagnostic-cleanup
+```
+
+This is safe for CI pipelines and local inspection. It prints a list of stale
+files with their sizes and the total space that would be freed, but does not
+modify any files.
+
+### Force Mode (Actual Deletion)
+
+To actually delete the stale artifacts:
+
+```bash
+python3 build.py --diagnostic-cleanup --force-cleanup
+```
+
+This removes all stale diagnostic files while preserving the current commit's
+artifacts. Use this when you need to reclaim disk space or clean up before a
+release.
+
+### Safety Guarantees
+
+- **Dry-run is the default**: running `--diagnostic-cleanup` alone never
+  modifies or deletes any files.
+- **Current commit artifacts are always preserved**: the cleanup logic
+  explicitly excludes any file whose embedded commit ID matches the current
+  HEAD, including chunked `.logd` parts.
+- **Only standard diagnostic files are targeted**: files that do not match the
+  `build-XXXXXXXX.logd`, `build-XXXXXXXX-partNNN.logd`, or
+  `build-XXXXXXXX.json` naming pattern are ignored.
+
+### Running Tests
+
+The cleanup logic is tested independently using temporary directories:
+
+```bash
+python3 -m pytest tools/test_stale_cleanup.py -v
+```
+
+Or with unittest directly:
+
+```bash
+python3 tools/test_stale_cleanup.py
+```
+
+### Example Session
+
+```
+$ python3 build.py --diagnostic-cleanup
+
+  Tent of Trials: building
+  Working directory: /home/user/TentOfTrials
+
+  Stale diagnostic cleanup
+  Current commit: ec966bc5
+  Mode: DRY-RUN (no files will be modified)
+
+  WOULD DELETE (dry-run) 12 stale diagnostic artifact(s):
+    ▸ diagnostic/build-0f9ce9bb.json (0.5 KiB)
+    ▸ diagnostic/build-0f9ce9bb.logd (12.3 KiB)
+    ▸ diagnostic/build-11b17016.json (0.5 KiB)
+    ▸ diagnostic/build-11b17016-part001.logd (40960.0 KiB)
+    ...
+
+  Total space that would be freed: 245.8 MiB
+  Run with --force-cleanup to actually delete these artifacts.
+```
+
 ## Capacity Planning
 
 ### Resource Utilization
