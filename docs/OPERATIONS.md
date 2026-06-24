@@ -37,6 +37,31 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+The market gateway also exposes readiness and liveness endpoints for rollout
+and load-balancer checks:
+
+```bash
+curl -i http://localhost:8080/health/ready
+```
+
+When the gateway is ready, the readiness check returns:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"ready"}
+```
+
+During shutdown or when the gateway is not accepting traffic, it returns:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{"status":"not ready"}
+```
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
