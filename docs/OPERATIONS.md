@@ -310,3 +310,50 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Diagnostic Artifact Retention Report
+
+The build system can emit a machine-readable JSON summary of diagnostic
+artifact retention state. This is useful for CI checks and reviewer
+audits to see which artifacts belong to the current commit and which
+older artifacts remain in the tree.
+
+### Usage
+
+```bash
+# Print retention report for the default ./diagnostic directory
+python3 build.py --retention-report
+
+# Specify a custom diagnostic directory
+python3 build.py --retention-report --retention-dir /path/to/diagnostics
+```
+
+### Output Format
+
+The report is a JSON object with the following keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `current_commit` | string | Hex prefix of the current git commit (or `"unknown"`) |
+| `current_commit_artifacts` | string[] | Filenames belonging to the current commit |
+| `older_artifacts` | string[] | Filenames belonging to older commits |
+| `total_artifacts` | int | Total count of diagnostic artifacts |
+| `total_bytes` | int | Total size of all artifacts in bytes |
+
+Example output:
+
+```json
+{
+  "current_commit": "abcdef01",
+  "current_commit_artifacts": ["build-abcdef01.logd", "build-abcdef01.json"],
+  "older_artifacts": ["build-deadbeef.logd"],
+  "total_artifacts": 3,
+  "total_bytes": 12345
+}
+```
+
+### Properties
+
+- **Read-only**: The report never modifies or deletes artifacts
+- **CI-safe**: Safe to run in continuous integration pipelines
+- **Deterministic**: Output depends only on the diagnostic directory contents and the current git commit

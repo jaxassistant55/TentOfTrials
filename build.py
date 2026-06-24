@@ -783,6 +783,49 @@ def generate_logd(
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def retention_report(diagnostic_dir: Path) -> dict:
+    """Return a JSON-serializable retention summary of diagnostic artifacts.
+
+    The report is read-only and safe to run in CI. It lists current-commit
+    artifacts, older artifacts, total count, and total bytes.
+
+    Keys in the returned dict:
+        - current_commit: hex prefix of the current git commit (or "unknown")
+        - current_commit_artifacts: list of filenames belonging to the current commit
+        - older_artifacts: list of filenames belonging to older commits
+        - total_artifacts: int count of all diagnostic artifacts
+        - total_bytes: int sum of file sizes in bytes
+    """
+    commit_id = current_commit_id()
+
+    current_artifacts: list[str] = []
+    older_artifacts: list[str] = []
+    total_bytes = 0
+
+    if diagnostic_dir.exists():
+        for entry in sorted(diagnostic_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            # Only consider build diagnostic files (build-XXXXXXXX.logd / .json)
+            if name.startswith("build-") and (name.endswith(".logd") or name.endswith(".json")):
+                size = entry.stat().st_size
+                total_bytes += size
+                # Check if this artifact belongs to the current commit
+                if commit_id != "00000000" and f"build-{commit_id}" in name:
+                    current_artifacts.append(name)
+                else:
+                    older_artifacts.append(name)
+
+    return {
+        "current_commit": commit_id if commit_id != "00000000" else "unknown",
+        "current_commit_artifacts": current_artifacts,
+        "older_artifacts": older_artifacts,
+        "total_artifacts": len(current_artifacts) + len(older_artifacts),
+        "total_bytes": total_bytes,
+    }
+
+
 def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
     print(f"  {color('Build Summary', Colors.BOLD)}")
 
@@ -827,6 +870,10 @@ Examples:
 
 Diagnostic bundle:
   python3 build.py
+
+Retention report:
+  python3 build.py --retention-report    Print JSON retention summary
+  python3 build.py --retention-report --retention-dir /path/to/diagnostics
         """,
     )
     parser.add_argument(
@@ -850,8 +897,23 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
+    parser.add_argument(
+        "--retention-report", action="store_true",
+        help="Print a JSON diagnostic artifact retention summary and exit (read-only, CI-safe)",
+    )
+    parser.add_argument(
+        "--retention-dir",
+        help="Directory to scan for diagnostic artifacts (default: ./diagnostic)",
+        default=None,
+    )
 
     args = parser.parse_args()
+
+    if args.retention_report:
+        report_dir = Path(args.retention_dir) if args.retention_dir else DIAGNOSTIC_DIR
+        report = retention_report(report_dir)
+        print(json.dumps(report, indent=2))
+        return 0
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
