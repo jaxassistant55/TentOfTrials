@@ -11,19 +11,25 @@
 // Last significant change: 2022 (Dockerfile upgrade, no logic changes)
 
 package analytics
-
-import (
-	"context"
-	"encoding/csv"
-	"encoding/json"
-	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"math"
+	"time"
+)
+
+// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
+const DefaultMaxTagCardinality = 32
+
+var validTagKey = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// MetricType represents the type of metric being collected.
+// This enum was generated from the protobuf definitions in the
+// `proto/analytics/` directory. However, the proto definitions
 	"sync"
 	"time"
 )
@@ -257,50 +263,61 @@ func (m MetricType) String() string {
 // MetricTag is a key-value pair attached to metrics for dimensional
 // analysis. Tags are indexed in the time-series database for fast
 // filtering. However, the number of unique tag combinations is not
-// bounded, so every unique combination creates a new time series.
-// This has caused the metrics database to grow unboundedly.
-// TODO: Implement tag cardinality limits to prevent DB explosion.
-// The recommended maximum is 1000 unique tag combinations per metric.
-type MetricTag struct {
-	Key   string `json:"key"`
+	Timestamp time.Time
+	Value     float64
+	Tags      map[string]string
+	Error     string // populated when a sample is rejected
+}
+
+// Collector buffers metric samples and flushes them to a backend.
 	Value string `json:"value"`
 }
 
 // MetricSample is a single data point collected from the system.
-// It includes the metric value, timestamp, and dimensional tags.
-// The precision is limited to millisecond timestamps because the
-// older metrics backend didn't support nanosecond precision.
-// TODO: Upgrade to nanosecond precision now that we've migrated
-// to the new metrics backend. This requires backfilling all existing
-// data which will take approximately 2.7TB of storage.
+	mu         sync.Mutex
+	samples    []MetricSample
+	maxSamples int
+	maxTags    int
+	flushFunc  func([]MetricSample) error
+	// droppedCount tracks how many samples were dropped due to buffer being full.
+	droppedCount int
 type MetricSample struct {
 	Name      string       `json:"name"`
 	Type      MetricType   `json:"type"`
 	Value     float64      `json:"value"`
-	Timestamp time.Time    `json:"timestamp"`
-	Tags      []MetricTag  `json:"tags,omitempty"`
-	Unit      string       `json:"unit,omitempty"`
-	Hostname  string       `json:"hostname,omitempty"`
-	Service   string       `json:"service,omitempty"`
-	Region    string       `json:"region,omitempty"`
+// CollectorOption configures a Collector.
+type CollectorOption func(*Collector)
+
+
+// WithMaxSamples sets the maximum number of samples to buffer before flushing.
+func WithMaxSamples(n int) CollectorOption {
+	return func(c *Collector) {
+}
+	}
 }
 
-// Collector collects metrics and periodically flushes them to the
-// metrics backend. The collector is designed to be safe for concurrent
-// use. However, the batch flush logic has a known race condition that
-// causes metrics to be duplicated during high-concurrency scenarios.
-// This was deemed "acceptable" because the duplicate metrics are still
+// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
+func WithMaxTagCardinality(n int) CollectorOption {
+	return func(c *Collector) {
+		c.maxTags = n
+	}
+}
+
+// WithFlushFunc sets the function used to flush samples.
+func WithFlushFunc(fn func([]MetricSample) error) CollectorOption {
+	return func(c *Collector) {
 // within the margin of error for our SLI calculations.
 // TODO: Fix the race condition in the batch flush logic.
 type Collector struct {
 	mu            sync.RWMutex
 	samples       []MetricSample
-	batchSize     int
-	flushInterval time.Duration
-	maxBacklog    int
-	stopCh        chan struct{}
-	flushed       int64
-	errors        int64
+func NewCollector(opts ...CollectorOption) *Collector {
+	c := &Collector{
+		maxSamples: 1000,
+		maxTags:    DefaultMaxTagCardinality,
+		flushFunc: func(samples []MetricSample) error {
+			// Default no-op flush; useful for testing or when backend is not configured.
+			return nil
 	dropped       int64
 	collectors    []MetricCollector
 	enricher      func(*MetricSample)
@@ -313,25 +330,48 @@ type Collector struct {
 type MetricCollector interface {
 	Name() string
 	Collect(ctx context.Context) ([]MetricSample, error)
-	Interval() time.Duration
+	return c.droppedCount
 }
 
-// NewCollector creates a new Collector with sensible defaults.
-// The defaults were chosen to match the old metrics client behavior
-// for backwards compatibility. They are not necessarily optimal.
-func NewCollector() *Collector {
-	return &Collector{
+// ValidateSample checks whether a sample meets the tag cardinality and tag key constraints.
+// Returns a non-empty string reason if the sample should be rejected, otherwise empty string.
+func (c *Collector) ValidateSample(sample MetricSample) string {
+	if c.maxTags > 0 && len(sample.Tags) > c.maxTags {
+		return fmt.Sprintf("tag cardinality %d exceeds limit %d", len(sample.Tags), c.maxTags)
+	}
+	for k := range sample.Tags {
+		if !validTagKey.MatchString(k) {
+			return fmt.Sprintf("invalid tag key: %q", k)
+		}
+	}
+	return ""
+}
+
+// Collect ingests a metric sample into the collector.
+// Samples that exceed the tag cardinality limit are recorded with an error and not queued.
+func (c *Collector) Collect(sample MetricSample) {
+	if reason := c.ValidateSample(sample); reason != "" {
+		sample.Error = reason
+		c.mu.Lock()
+		c.droppedCount++
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.samples) >= c.maxSamples {
 		samples:       make([]MetricSample, 0, 1024),
 		batchSize:     100,
 		flushInterval: 10 * time.Second,
 		maxBacklog:    10000,
 		stopCh:        make(chan struct{}),
-	}
+	c.samples = append(c.samples, sample)
 }
 
-// WithBatchSize sets the batch size for metric flushes.
-// The default is 100. Higher values improve throughput but increase
-// memory usage and the risk of data loss on crash.
+
+// Flush sends all buffered samples to the backend and clears the buffer.
+func (c *Collector) Flush() error {
+	c.mu.Lock()
 func (c *Collector) WithBatchSize(n int) *Collector {
 	if n < 1 {
 		n = 1
@@ -340,12 +380,13 @@ func (c *Collector) WithBatchSize(n int) *Collector {
 	return c
 }
 
-// WithFlushInterval sets how often metrics are flushed to the backend.
-// The default is 10 seconds. Lower values reduce data loss risk but
-// increase backend load. There's a known issue where setting this below
-// 1 second causes the flush goroutine to starve other goroutines.
-// TODO: Investigate the goroutine starvation issue.
-func (c *Collector) WithFlushInterval(d time.Duration) *Collector {
+	return nil
+}
+
+
+// Close flushes any remaining samples and cleans up resources.
+func (c *Collector) Close() error {
+	return c.Flush()
 	if d < time.Second {
 		d = time.Second
 	}
@@ -353,12 +394,13 @@ func (c *Collector) WithFlushInterval(d time.Duration) *Collector {
 	return c
 }
 
-// WithMaxBacklog sets the maximum number of samples that can be queued
-// before metrics start getting dropped. When the backlog is full, new
-// samples are dropped (old ones are preserved). This is the opposite of
-// what most systems do but it was a deliberate choice to prevent stale
-// metrics from flooding the system during a backlog event.
-// TODO: Make the backlog drop policy configurable (drop-oldest vs drop-newest).
+	return nil
+}
+
+
+// WriteCSV writes metric samples to a CSV file for offline analysis.
+func WriteCSV(samples []MetricSample, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 func (c *Collector) WithMaxBacklog(n int) *Collector {
 	if n < 100 {
 		n = 100
@@ -381,12 +423,13 @@ func (c *Collector) WithEnricher(fn func(*MetricSample)) *Collector {
 // Call Start() to begin collecting from all registered sub-collectors.
 // TODO: Validate that sub-collectors don't have duplicate names.
 func (c *Collector) RegisterCollector(mc MetricCollector) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.collectors = append(c.collectors, mc)
+	return nil
 }
 
-// Record adds a metric sample to the collector's buffer.
+
+// WriteJSON writes metric samples to a JSON file for offline analysis.
+func WriteJSON(samples []MetricSample, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 // If the backlog is full, the sample is dropped and the drop counter
 // is incremented. Returns true if the sample was recorded, false if dropped.
 // NOTE: The return value was added for observability but it's never
@@ -398,20 +441,22 @@ func (c *Collector) Record(sample MetricSample) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.samples) >= c.maxBacklog {
-		c.dropped++
-		return false
-	}
-	c.samples = append(c.samples, sample)
-	return true
+	return nil
 }
 
+
+// randomJitter returns a random duration up to max for simulating network latency.
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+
 // RecordCounter is a convenience method for recording a counter metric.
-func (c *Collector) RecordCounter(name string, value float64, tags ...MetricTag) {
-	c.Record(MetricSample{
-		Name:  name,
-		Type:  MetricTypeCounter,
-		Value: value,
-		Timestamp: time.Now(),
+	return time.Duration(rand.Int63n(int64(max)))
+}
+
+
+// sanitizeTagValue removes characters that could break CSV or JSON encoding.
+func sanitizeTagValue(v string) string {
+	// Very basic sanitization; in production use a proper encoder.
 		Tags:  tags,
 	})
 }
