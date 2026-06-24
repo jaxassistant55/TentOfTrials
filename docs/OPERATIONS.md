@@ -310,3 +310,55 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Graceful Shutdown Configuration
+
+### Shutdown Grace Period
+
+The backend supports a configurable shutdown grace period that controls how
+long the process waits for in-flight requests to complete before forcing
+exit. This is set via the `TOT_SHUTDOWN_GRACE_SECS` environment variable.
+
+| Setting | Value |
+|---------|-------|
+| Environment variable | `TOT_SHUTDOWN_GRACE_SECS` |
+| Default | 30 seconds |
+| Minimum | 1 second |
+| Maximum | 300 seconds (5 minutes) |
+
+### Behavior
+
+| Input | Result |
+|-------|--------|
+| Unset | Uses the default (30s) |
+| Valid integer in range (1–300) | Uses the parsed value |
+| Zero or negative | Clamped to 1 second |
+| Above 300 | Clamped to 300 seconds |
+| Non-numeric (e.g. `abc`, `30.5`) | Falls back to 30 seconds |
+
+The parser module is at `backend/src/shutdown_grace.rs` and returns a
+`GracePeriod` struct with both the resolved `Duration` and a `GraceSource`
+enum describing how the value was determined (default, env, clamped, or
+invalid).
+
+### Running the Tests
+
+```bash
+cd backend && cargo test shutdown_grace
+```
+
+### Kubernetes Integration
+
+When running on Kubernetes, set the pod `terminationGracePeriodSeconds` to
+be at least 10 seconds longer than `TOT_SHUTDOWN_GRACE_SECS` so the process
+has time to shut down before the kubelet sends SIGKILL:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 40  # grace period + 10s buffer
+  containers:
+    - name: backend
+      env:
+        - name: TOT_SHUTDOWN_GRACE_SECS
+          value: "30"
+```
