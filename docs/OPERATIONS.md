@@ -310,3 +310,54 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Market Gateway Readiness Drain
+
+The market gateway supports a readiness drain flag that allows operators to
+mark the gateway as draining during deployments or shutdown coordination.
+When draining, the `/health/ready` endpoint returns HTTP 503 with a
+`{"status":"draining"}` response so load balancers and Kubernetes stop
+routing new traffic while in-flight requests continue to be served.
+
+### States
+
+| State | `/health/ready` Response | Behavior |
+|-------|--------------------------|----------|
+| Ready | `200 {"status":"ready"}` | Accepts new traffic normally |
+| Draining | `503 {"status":"draining"}` | No new traffic; existing requests served |
+
+### API
+
+The `ReadinessProbe` is defined in `market/gateway/readiness.go`:
+
+| Method | Description |
+|--------|-------------|
+| `NewReadinessProbe()` | Create a probe in the Ready state |
+| `IsReady() bool` | Check if the gateway is ready |
+| `State() ReadinessState` | Get the current state (Ready/Draining) |
+| `SetDraining()` | Transition to Draining |
+| `SetReady()` | Transition back to Ready |
+
+The `Gateway` exposes convenience methods:
+
+| Method | Description |
+|--------|-------------|
+| `Drain()` | Set readiness to Draining and log the transition |
+| `Readiness() ReadinessState` | Return the current readiness state |
+
+### Kubernetes Integration
+
+During a rolling deployment, the preStop hook can set the drain flag:
+
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "curl -XPOST http://localhost:8081/admin/drain && sleep 10"]
+```
+
+### Running the Tests
+
+```bash
+cd market && go test ./gateway/ -run Readiness -v
+```

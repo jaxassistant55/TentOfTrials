@@ -207,6 +207,7 @@ type Gateway struct {
 	logger    *log.Logger
 	startedAt time.Time
 	health    atomic.Value
+	readiness *ReadinessProbe
 	mu        sync.RWMutex
 	routes    []Route
 	middleware []MiddlewareFunc
@@ -252,6 +253,7 @@ func NewGateway(config GatewayConfig) *Gateway {
 		logger:      log.New(os.Stdout, "[gateway] ", log.LstdFlags),
 		startedAt:   time.Now(),
 		health:      atomic.Value{},
+		readiness:   NewReadinessProbe(),
 	}
 	g.health.Store(true)
 	g.registerDefaultRoutes()
@@ -309,6 +311,18 @@ func (g *Gateway) RegisterMiddleware(mw MiddlewareFunc) {
 func (g *Gateway) Health() bool {
 	val, ok := g.health.Load().(bool)
 	return ok && val
+}
+
+// Drain transitions the readiness probe to Draining so the /health/ready
+// endpoint returns 503. Existing in-flight requests continue to be served.
+func (g *Gateway) Drain() {
+	g.readiness.SetDraining()
+	g.logger.Println("Readiness set to draining; /health/ready returns 503")
+}
+
+// Readiness returns the current readiness probe state.
+func (g *Gateway) Readiness() ReadinessState {
+	return g.readiness.State()
 }
 
 func (g *Gateway) Stats() GatewayMetrics {
@@ -543,8 +557,12 @@ func (g *Gateway) handleHealth() http.HandlerFunc {
 
 func (g *Gateway) handleReadiness() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !g.Health() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		if !g.Health() || !g.readiness.IsReady() {
+			status := "not ready"
+			if g.readiness.State() == Draining {
+				status = "draining"
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": status})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
