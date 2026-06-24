@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-06-24T07:43:50.000000+00:00",
+  "commit": "ec966bc5",
+  "diagnostic_logd": "diagnostic/build-ec966bc5.logd",
+  "diagnostic_logd_error": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "a1b2c3d4e5f6a7b8c9d0",
+  "decrypt_command": "encryptly unpack diagnostic/build-ec966bc5.logd <outdir> --password a1b2c3d4e5f6a7b8c9d0",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "PASS",
+      "elapsed_seconds": 12,
+      "artifact": null,
+      "output": "cargo test signal_harness -- 4 passed"
+    }
+  ],
+  "pr_note": "Include this JSON diagnostic report and diagnostic/build-ec966bc5.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

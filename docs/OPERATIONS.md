@@ -85,6 +85,88 @@ Alerts are sent to PagerDuty and Slack (#ops-alerts channel).
 | DBConnectionPool | Pool exhaustion risk | Critical | 10 minutes |
 | QueueBacklog | Queue depth > 10000 for 5 minutes | Warning | 15 minutes |
 
+## Signal Shutdown Harness
+
+The backend includes a signal-based shutdown integration harness
+(`backend/src/signal_harness.rs`) for testing and verifying the graceful
+shutdown path triggered by SIGTERM and SIGINT signals.
+
+### Overview
+
+When the backend process receives SIGTERM or SIGINT, the shutdown handler in
+`main.rs` initiates a graceful drain sequence:
+
+1. The signal is received via `tokio::signal::unix::signal(SignalKind::terminate())`
+   or `tokio::signal::ctrl_c()`.
+2. The broker disconnects (`broker.disconnect().await`).
+3. The discovery service withdraws the node (`discovery.withdraw().await`).
+4. The registry shuts down (`registry.shutdown().await`).
+5. A log message confirms shutdown is complete.
+
+The `SignalShutdownHarness` struct simulates this flow in tests without
+requiring actual OS signals, making it safe to run in CI environments.
+
+### Harness API
+
+| Method | Description |
+|--------|-------------|
+| `SignalShutdownHarness::new(grace_period)` | Create a harness with the given grace period duration |
+| `notify(ShutdownSignal)` | Simulate receiving a shutdown signal (Sigterm or Sigint) |
+| `begin_drain()` | Transition to the draining state |
+| `complete()` | Mark shutdown as completed within the grace period |
+| `timeout()` | Simulate grace period expiration |
+| `state()` | Query the current harness state |
+| `trigger_signal()` | Get which signal triggered the shutdown |
+| `grace_period()` | Get the configured grace period |
+
+### Shutdown Signal Types
+
+| Variant | Description |
+|---------|-------------|
+| `ShutdownSignal::Sigterm` | SIGTERM (terminate signal) |
+| `ShutdownSignal::Sigint` | SIGINT (interrupt signal, e.g. Ctrl+C) |
+
+### Harness States
+
+| State | Description |
+|-------|-------------|
+| `Idle` | Harness created, no signal received |
+| `Notified` | A shutdown signal has been received |
+| `Draining` | Shutdown drain is in progress |
+| `Finished(Completed)` | Shutdown completed within grace period |
+| `Finished(TimedOut)` | Grace period expired before shutdown finished |
+
+### Unit Tests
+
+The harness includes four unit tests covering the critical shutdown paths:
+
+| Test | Description |
+|------|-------------|
+| `test_sigterm_notification` | Verifies SIGTERM is recorded and state transitions to Notified |
+| `test_sigint_notification` | Verifies SIGINT is recorded and state transitions to Notified |
+| `test_grace_period_expiration` | Verifies timeout produces Finished(TimedOut) state |
+| `test_successful_completion` | Verifies full drain produces Finished(Completed) state |
+
+### Running the Tests
+
+```bash
+cd backend
+cargo test signal_harness
+```
+
+### Integration with Production Shutdown
+
+In production (Kubernetes), the shutdown flow is triggered by pod termination:
+
+1. Kubernetes sends SIGTERM to the pod container.
+2. The backend's `tokio::signal` handler catches SIGTERM.
+3. The graceful shutdown sequence runs (broker disconnect, discovery withdraw, registry shutdown).
+4. If the grace period (default 30s, configurable via `terminationGracePeriodSeconds`) expires before shutdown completes, Kubernetes sends SIGKILL.
+
+The harness allows operators and developers to verify the shutdown logic
+behaves correctly under both normal completion and timeout scenarios without
+needing to deploy or send real signals to a running process.
+
 ## Incident Response
 
 ### Severity Levels
