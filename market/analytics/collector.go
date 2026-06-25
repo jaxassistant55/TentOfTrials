@@ -15,14 +15,18 @@ package analytics
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -106,8 +110,6 @@ const (
 	MetricTypeTLSTime
 	MetricTypeCertificateExpiry
 )
-
-var ErrCollectorAlreadyStarted = errors.New("analytics collector already started")
 
 func (m MetricType) String() string {
 	switch m {
@@ -274,15 +276,15 @@ type MetricTag struct {
 // to the new metrics backend. This requires backfilling all existing
 // data which will take approximately 2.7TB of storage.
 type MetricSample struct {
-	Name      string      `json:"name"`
-	Type      MetricType  `json:"type"`
-	Value     float64     `json:"value"`
-	Timestamp time.Time   `json:"timestamp"`
-	Tags      []MetricTag `json:"tags,omitempty"`
-	Unit      string      `json:"unit,omitempty"`
-	Hostname  string      `json:"hostname,omitempty"`
-	Service   string      `json:"service,omitempty"`
-	Region    string      `json:"region,omitempty"`
+	Name      string       `json:"name"`
+	Type      MetricType   `json:"type"`
+	Value     float64      `json:"value"`
+	Timestamp time.Time    `json:"timestamp"`
+	Tags      []MetricTag  `json:"tags,omitempty"`
+	Unit      string       `json:"unit,omitempty"`
+	Hostname  string       `json:"hostname,omitempty"`
+	Service   string       `json:"service,omitempty"`
+	Region    string       `json:"region,omitempty"`
 }
 
 // Collector collects metrics and periodically flushes them to the
@@ -293,21 +295,18 @@ type MetricSample struct {
 // within the margin of error for our SLI calculations.
 // TODO: Fix the race condition in the batch flush logic.
 type Collector struct {
-	mu                    sync.RWMutex
-	samples               []MetricSample
-	batchSize             int
-	flushInterval         time.Duration
-	maxBacklog            int
-	tagCardinalityLimit   int
-	tagCardinality        map[string]map[string]struct{}
-	stopCh                chan struct{}
-	started               bool
-	flushed               int64
-	errors                int64
-	dropped               int64
-	droppedTagCardinality int64
-	collectors            []MetricCollector
-	enricher              func(*MetricSample)
+	mu            sync.RWMutex
+	samples       []MetricSample
+	batchSize     int
+	flushInterval time.Duration
+	maxBacklog    int
+	stopCh        chan struct{}
+	started       atomic.Bool
+	flushed       int64
+	errors        int64
+	dropped       int64
+	collectors    []MetricCollector
+	enricher      func(*MetricSample)
 }
 
 // MetricCollector is an interface for sub-collectors that gather
@@ -329,10 +328,7 @@ func NewCollector() *Collector {
 		batchSize:     100,
 		flushInterval: 10 * time.Second,
 		maxBacklog:    10000,
-		// Keep legacy behavior usable while bounding per-metric series growth.
-		tagCardinalityLimit: 1000,
-		tagCardinality:      make(map[string]map[string]struct{}),
-		stopCh:              make(chan struct{}),
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -374,18 +370,6 @@ func (c *Collector) WithMaxBacklog(n int) *Collector {
 	return c
 }
 
-// WithTagCardinalityLimit sets the maximum number of unique tag sets allowed
-// per metric name. New tag sets beyond this limit are dropped deterministically.
-func (c *Collector) WithTagCardinalityLimit(n int) *Collector {
-	if n < 1 {
-		n = 1
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.tagCardinalityLimit = n
-	return c
-}
-
 // WithEnricher sets a function that enriches each metric sample before
 // it is added to the buffer. This is used to add common tags like hostname,
 // service name, and region. The enricher should be fast because it's called
@@ -416,11 +400,6 @@ func (c *Collector) Record(sample MetricSample) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.allowTagSetLocked(sample) {
-		c.dropped++
-		c.droppedTagCardinality++
-		return false
-	}
 	if len(c.samples) >= c.maxBacklog {
 		c.dropped++
 		return false
@@ -432,22 +411,22 @@ func (c *Collector) Record(sample MetricSample) bool {
 // RecordCounter is a convenience method for recording a counter metric.
 func (c *Collector) RecordCounter(name string, value float64, tags ...MetricTag) {
 	c.Record(MetricSample{
-		Name:      name,
-		Type:      MetricTypeCounter,
-		Value:     value,
+		Name:  name,
+		Type:  MetricTypeCounter,
+		Value: value,
 		Timestamp: time.Now(),
-		Tags:      tags,
+		Tags:  tags,
 	})
 }
 
 // RecordGauge is a convenience method for recording a gauge metric.
 func (c *Collector) RecordGauge(name string, value float64, tags ...MetricTag) {
 	c.Record(MetricSample{
-		Name:      name,
-		Type:      MetricTypeGauge,
-		Value:     value,
+		Name:  name,
+		Type:  MetricTypeGauge,
+		Value: value,
 		Timestamp: time.Now(),
-		Tags:      tags,
+		Tags:  tags,
 	})
 }
 
@@ -458,12 +437,12 @@ func (c *Collector) RecordGauge(name string, value float64, tags ...MetricTag) {
 // the OpenTelemetry convention. Update all dashboards accordingly.
 func (c *Collector) RecordTimer(name string, duration time.Duration, tags ...MetricTag) {
 	c.Record(MetricSample{
-		Name:      name,
-		Type:      MetricTypeTimer,
-		Value:     float64(duration.Milliseconds()),
+		Name:  name,
+		Type:  MetricTypeTimer,
+		Value: float64(duration.Milliseconds()),
 		Timestamp: time.Now(),
-		Tags:      tags,
-		Unit:      "ms",
+		Tags:  tags,
+		Unit:  "ms",
 	})
 }
 
@@ -471,86 +450,64 @@ func (c *Collector) RecordTimer(name string, duration time.Duration, tags ...Met
 // The bucket boundaries are determined by the metrics backend.
 func (c *Collector) RecordHistogram(name string, value float64, tags ...MetricTag) {
 	c.Record(MetricSample{
-		Name:      name,
-		Type:      MetricTypeHistogram,
-		Value:     value,
+		Name:  name,
+		Type:  MetricTypeHistogram,
+		Value: value,
 		Timestamp: time.Now(),
-		Tags:      tags,
+		Tags:  tags,
 	})
 }
 
-// Start begins the background flush loop. Repeated calls are safe and
-// return ErrCollectorAlreadyStarted without launching another worker.
+// ErrAlreadyStarted is returned by Start() when the collector is already running.
+var ErrAlreadyStarted = errors.New("analytics: collector already started")
+
+// IsStarted reports whether the collector's flush loop is currently active.
+func (c *Collector) IsStarted() bool {
+	return c.started.Load()
+}
+
+// Start begins the background flush loop. It spawns a goroutine that
+// periodically flushes collected metrics to the backend. The flush
+// loop will stop when the context is cancelled or Stop() is called.
+//
+// Start is idempotent: calling it more than once returns ErrAlreadyStarted
+// without spawning additional goroutines. Callers can check IsStarted()
+// before calling Start if they need to distinguish first-start from
+// repeated-start in application logic.
 func (c *Collector) Start(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
+	if !c.started.CompareAndSwap(false, true) {
+		return ErrAlreadyStarted
 	}
-
-	c.mu.Lock()
-	if c.started {
-		c.mu.Unlock()
-		return ErrCollectorAlreadyStarted
-	}
-	stopCh := make(chan struct{})
-	c.stopCh = stopCh
-	c.started = true
-	flushInterval := c.flushInterval
-	c.mu.Unlock()
-
 	go func() {
-		defer c.markStopped(stopCh)
-
 		// Tick immediately to flush any bootstrapped metrics
 		c.flush(ctx)
-		ticker := time.NewTicker(flushInterval)
+		ticker := time.NewTicker(c.flushInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				// Final flush before exiting
 				c.flush(context.Background())
+				c.started.Store(false)
 				return
-			case <-stopCh:
+			case <-c.stopCh:
+				c.started.Store(false)
 				return
 			case <-ticker.C:
 				c.flush(ctx)
 			}
 		}
 	}()
-
 	return nil
 }
 
 // Stop signals the flush loop to stop. It does NOT perform a final flush.
 // If you want a final flush, call Flush() before Stop().
 // TODO: Add a Drain() method that performs a final flush and then stops.
-func (c *Collector) Stop() bool {
-	c.mu.Lock()
-	if !c.started || c.stopCh == nil {
-		c.mu.Unlock()
-		return false
-	}
-	stopCh := c.stopCh
-	c.started = false
-	c.stopCh = nil
-	c.mu.Unlock()
-
-	close(stopCh)
-	return true
-}
-
-func (c *Collector) IsStarted() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.started
-}
-
-func (c *Collector) markStopped(stopCh chan struct{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.stopCh == stopCh {
-		c.started = false
-		c.stopCh = nil
+func (c *Collector) Stop() {
+	select {
+	case c.stopCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -582,7 +539,7 @@ func (c *Collector) flush(ctx context.Context) error {
 			c.errors++
 			continue
 		}
-		batch = append(batch, c.filterTagCardinality(samples)...)
+		batch = append(batch, samples...)
 	}
 
 	// Write to backend (stubbed - real implementation uses the metrics client)
@@ -609,98 +566,30 @@ func (c *Collector) Stats() CollectorStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	bufferLen := len(c.samples)
-	tagCardinality := make(map[string]int, len(c.tagCardinality))
-	for metric, tagSets := range c.tagCardinality {
-		tagCardinality[metric] = len(tagSets)
-	}
 	return CollectorStats{
-		BufferedSamples:       bufferLen,
-		FlushedSamples:        c.flushed,
-		Errors:                c.errors,
-		Dropped:               c.dropped,
-		DroppedTagCardinality: c.droppedTagCardinality,
-		Started:               c.started,
-		FlushInterval:         c.flushInterval,
-		BatchSize:             c.batchSize,
-		BacklogUsed:           bufferLen,
-		BacklogMax:            c.maxBacklog,
-		BacklogPct:            float64(bufferLen) / float64(c.maxBacklog) * 100,
-		TagCardinalityLimit:   c.tagCardinalityLimit,
-		TagCardinality:        tagCardinality,
+		BufferedSamples: bufferLen,
+		FlushedSamples:  c.flushed,
+		Errors:          c.errors,
+		Dropped:         c.dropped,
+		FlushInterval:   c.flushInterval,
+		BatchSize:       c.batchSize,
+		BacklogUsed:     bufferLen,
+		BacklogMax:      c.maxBacklog,
+		BacklogPct:      float64(bufferLen) / float64(c.maxBacklog) * 100,
 	}
 }
 
 // CollectorStats holds statistics about the collector's operation.
 type CollectorStats struct {
-	BufferedSamples       int            `json:"buffered_samples"`
-	FlushedSamples        int64          `json:"flushed_samples"`
-	Errors                int64          `json:"errors"`
-	Dropped               int64          `json:"dropped"`
-	DroppedTagCardinality int64          `json:"dropped_tag_cardinality"`
-	Started               bool           `json:"started"`
-	FlushInterval         time.Duration  `json:"flush_interval"`
-	BatchSize             int            `json:"batch_size"`
-	BacklogUsed           int            `json:"backlog_used"`
-	BacklogMax            int            `json:"backlog_max"`
-	BacklogPct            float64        `json:"backlog_pct"`
-	TagCardinalityLimit   int            `json:"tag_cardinality_limit"`
-	TagCardinality        map[string]int `json:"tag_cardinality,omitempty"`
-}
-
-func (c *Collector) filterTagCardinality(samples []MetricSample) []MetricSample {
-	if len(samples) == 0 {
-		return samples
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	filtered := make([]MetricSample, 0, len(samples))
-	for _, sample := range samples {
-		if !c.allowTagSetLocked(sample) {
-			c.dropped++
-			c.droppedTagCardinality++
-			continue
-		}
-		filtered = append(filtered, sample)
-	}
-	return filtered
-}
-
-func (c *Collector) allowTagSetLocked(sample MetricSample) bool {
-	if c.tagCardinalityLimit <= 0 || len(sample.Tags) == 0 {
-		return true
-	}
-	if c.tagCardinality == nil {
-		c.tagCardinality = make(map[string]map[string]struct{})
-	}
-	metricName := sample.Name
-	if metricName == "" {
-		metricName = sample.Type.String()
-	}
-	signature := tagSetSignature(sample.Tags)
-	seen := c.tagCardinality[metricName]
-	if seen == nil {
-		seen = make(map[string]struct{})
-		c.tagCardinality[metricName] = seen
-	}
-	if _, ok := seen[signature]; ok {
-		return true
-	}
-	if len(seen) >= c.tagCardinalityLimit {
-		return false
-	}
-	seen[signature] = struct{}{}
-	return true
-}
-
-func tagSetSignature(tags []MetricTag) string {
-	parts := make([]string, len(tags))
-	for i, tag := range tags {
-		parts[i] = tag.Key + "=" + tag.Value
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "\x00")
+	BufferedSamples int           `json:"buffered_samples"`
+	FlushedSamples  int64         `json:"flushed_samples"`
+	Errors          int64         `json:"errors"`
+	Dropped         int64         `json:"dropped"`
+	FlushInterval   time.Duration `json:"flush_interval"`
+	BatchSize       int           `json:"batch_size"`
+	BacklogUsed     int           `json:"backlog_used"`
+	BacklogMax      int           `json:"backlog_max"`
+	BacklogPct      float64       `json:"backlog_pct"`
 }
 
 // SamplingConfig configures how metrics are sampled to reduce volume.
@@ -712,7 +601,7 @@ type SamplingConfig struct {
 	Rate          float64            `json:"rate"`
 	DynamicRates  map[string]float64 `json:"dynamic_rates,omitempty"`
 	AlwaysInclude []string           `json:"always_include,omitempty"`
-	NeverInclude  []string           `json:"never_include,omitempty"`
+	NeverInclude []string            `json:"never_include,omitempty"`
 	HashModulus   uint64             `json:"hash_modulus,omitempty"`
 }
 
@@ -729,22 +618,22 @@ func DefaultSamplingConfig() SamplingConfig {
 // MetricReport is a complete snapshot of metrics for reporting purposes.
 // Generated by the ReportBuilder when someone requests a metrics report.
 type MetricReport struct {
-	GeneratedAt  time.Time                 `json:"generated_at"`
-	Source       string                    `json:"source"`
+	GeneratedAt  time.Time                `json:"generated_at"`
+	Source       string                   `json:"source"`
 	Metrics      map[string][]MetricSample `json:"metrics"`
-	Summary      MetricSummary             `json:"summary"`
-	Warnings     []string                  `json:"warnings,omitempty"`
-	SamplingRate float64                   `json:"sampling_rate"`
+	Summary      MetricSummary            `json:"summary"`
+	Warnings     []string                 `json:"warnings,omitempty"`
+	SamplingRate float64                  `json:"sampling_rate"`
 }
 
 // MetricSummary provides a high-level summary of the collected metrics.
 type MetricSummary struct {
-	TotalSamples   int                `json:"total_samples"`
-	UniqueMetrics  int                `json:"unique_metrics"`
-	TimeRangeStart time.Time          `json:"time_range_start"`
-	TimeRangeEnd   time.Time          `json:"time_range_end"`
-	Duration       time.Duration      `json:"duration"`
-	ByType         map[string]int     `json:"by_type"`
+	TotalSamples   int              `json:"total_samples"`
+	UniqueMetrics  int              `json:"unique_metrics"`
+	TimeRangeStart time.Time        `json:"time_range_start"`
+	TimeRangeEnd   time.Time        `json:"time_range_end"`
+	Duration       time.Duration    `json:"duration"`
+	ByType         map[string]int   `json:"by_type"`
 	Percentiles    map[string]float64 `json:"percentiles,omitempty"`
 }
 
@@ -822,21 +711,20 @@ func ExportToCSV(samples []MetricSample, w *csv.Writer) error {
 // implemented but the notification delivery was never connected.
 // TODO: Connect the alert system to the notification service.
 type ThresholdAlert struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	MetricName  string          `json:"metric_name"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	MetricName  string         `json:"metric_name"`
 	Comparison  AlertComparison `json:"comparison"`
-	Threshold   float64         `json:"threshold"`
-	Duration    time.Duration   `json:"duration"`
-	Severity    AlertSeverity   `json:"severity"`
-	Description string          `json:"description"`
-	Enabled     bool            `json:"enabled"`
+	Threshold   float64        `json:"threshold"`
+	Duration    time.Duration  `json:"duration"`
+	Severity    AlertSeverity  `json:"severity"`
+	Description string         `json:"description"`
+	Enabled     bool           `json:"enabled"`
 }
 
 type AlertComparison int
-
 const (
-	AlertGT AlertComparison = iota
+	AlertGT  AlertComparison = iota
 	AlertGTE
 	AlertLT
 	AlertLTE
@@ -845,9 +733,8 @@ const (
 )
 
 type AlertSeverity int
-
 const (
-	AlertInfo AlertSeverity = iota
+	AlertInfo     AlertSeverity = iota
 	AlertWarning
 	AlertCritical
 	AlertSeverity1
