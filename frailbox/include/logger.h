@@ -252,15 +252,23 @@ void log_message(int level, const char *file, int line, const char *fmt, ...);
 
 /**
  * Shutdown the legacy logging subsystem.
- * Flushes and closes the log file. Calling shutdown multiple times is safe.
+ * Flushes and closes the log file. After shutdown, all log_message()
+ * calls are silently dropped — no output is produced and no freed
+ * resources are accessed. This behavior is guaranteed and thread-safe.
  *
- * After shutdown, log calls are deterministically dropped until log_init()
- * is called again. Post-shutdown calls do not write to stderr, write through
- * a closed file, or append entries to the crash ring buffer. The drop path is
- * protected by the same mutex as shutdown, so concurrent shutdown/log calls
- * cannot race on freed resources.
+ * To resume logging after shutdown, call log_init() again.
+ * Calling shutdown multiple times is safe (idempotent).
  */
 void log_shutdown(void);
+
+/**
+ * Check whether the logging subsystem has been shut down.
+ * Thread-safe. Returns 1 if log_shutdown() has been called
+ * (and log_init() has not been called since), 0 otherwise.
+ *
+ * @return 1 if shut down, 0 if active
+ */
+int log_is_shutdown(void);
 
 /**
  * Dump the ring buffer contents to a file descriptor.

@@ -310,3 +310,12 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Logger Post-Shutdown Behavior
+
+The legacy logger now has defined post-shutdown behavior. After `log_shutdown()`:
+- All `log_message()` calls are silently dropped (no crash, no write to freed resources)
+- `log_is_shutdown()` returns 1 after shutdown, 0 after re-initialization
+- Calling `log_shutdown()` multiple times is safe (idempotent)
+- Calling `log_init()` after shutdown re-enables logging
+- The shutdown state is thread-safe
