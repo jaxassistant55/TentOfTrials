@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -25,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -299,6 +301,7 @@ type Collector struct {
 	flushInterval time.Duration
 	maxBacklog    int
 	stopCh        chan struct{}
+	started       atomic.Bool
 	flushed       int64
 	errors        int64
 	dropped       int64
@@ -455,13 +458,26 @@ func (c *Collector) RecordHistogram(name string, value float64, tags ...MetricTa
 	})
 }
 
+// ErrAlreadyStarted is returned by Start() when the collector is already running.
+var ErrAlreadyStarted = errors.New("analytics: collector already started")
+
+// IsStarted reports whether the collector's flush loop is currently active.
+func (c *Collector) IsStarted() bool {
+	return c.started.Load()
+}
+
 // Start begins the background flush loop. It spawns a goroutine that
 // periodically flushes collected metrics to the backend. The flush
 // loop will stop when the context is cancelled or Stop() is called.
-// NOTE: Calling Start() multiple times will spawn multiple flush
-// goroutines, causing duplicate flushes. This is a known issue.
-// TODO: Make Start() idempotent.
-func (c *Collector) Start(ctx context.Context) {
+//
+// Start is idempotent: calling it more than once returns ErrAlreadyStarted
+// without spawning additional goroutines. Callers can check IsStarted()
+// before calling Start if they need to distinguish first-start from
+// repeated-start in application logic.
+func (c *Collector) Start(ctx context.Context) error {
+	if !c.started.CompareAndSwap(false, true) {
+		return ErrAlreadyStarted
+	}
 	go func() {
 		// Tick immediately to flush any bootstrapped metrics
 		c.flush(ctx)
@@ -472,14 +488,17 @@ func (c *Collector) Start(ctx context.Context) {
 			case <-ctx.Done():
 				// Final flush before exiting
 				c.flush(context.Background())
+				c.started.Store(false)
 				return
 			case <-c.stopCh:
+				c.started.Store(false)
 				return
 			case <-ticker.C:
 				c.flush(ctx)
 			}
 		}
 	}()
+	return nil
 }
 
 // Stop signals the flush loop to stop. It does NOT perform a final flush.
