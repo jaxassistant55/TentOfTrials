@@ -37,6 +37,120 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+
+
+### Market Gateway Readiness Checks
+
+The market gateway exposes readiness and liveness endpoints for Kubernetes
+deployment checks. These can be used in local development and CI pipelines
+to validate the gateway is ready to accept traffic.
+
+#### Readiness Endpoint
+
+```bash
+# Check if the market gateway is ready
+curl -s http://localhost:9000/health/ready
+```
+
+**Ready response (200 OK):**
+```json
+{
+  "status": "ready"
+}
+```
+
+**Not ready response (503 Service Unavailable):**
+```json
+{
+  "status": "not ready"
+}
+```
+
+The readiness check returns 200 when the gateway is healthy and able to serve
+requests. It returns 503 when the gateway is still initializing or has been
+marked unhealthy.
+
+#### Liveness Endpoint
+
+```bash
+# Check if the market gateway is alive
+curl -s http://localhost:9000/health/live
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "alive"
+}
+```
+
+The liveness check always returns 200 if the process is running. Use this
+for Kubernetes liveness probes to detect if the process needs to be restarted.
+
+#### Health Endpoint
+
+```bash
+# Check overall health status
+curl -s http://localhost:9000/health
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "ok",
+  "version": "3.2.0",
+  "uptime_seconds": 86400,
+  "timestamp": "2024-01-15T00:00:00Z"
+}
+```
+
+#### Example Kubernetes Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: market-gateway
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway
+        ports:
+        - containerPort: 9000
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 9000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+```
+
+#### CI Integration
+
+```bash
+# Start the gateway in background
+go run ./market/main.go &
+
+# Wait for it to be ready
+for i in $(seq 1 30); do
+  if curl -s http://localhost:9000/health/ready | grep -q '"status": "ready"'; then
+    echo "Gateway is ready"
+    break
+  fi
+  sleep 1
+done
+
+# Run integration tests
+go test ./market/...
+```
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
