@@ -37,6 +37,37 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+Market gateway readiness can be checked before routing traffic to the
+service:
+
+```bash
+curl -i http://localhost:8080/health/ready
+```
+
+When the gateway is ready, the endpoint returns `200 OK`:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+When the gateway is shutting down or otherwise marked unhealthy, the endpoint
+returns `503 Service Unavailable`:
+
+```json
+{
+  "status": "not ready"
+}
+```
+
+Local and CI checks can validate the behavior without external credentials:
+
+```bash
+cd market
+go test ./gateway -run TestReadinessEndpoint
+```
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
