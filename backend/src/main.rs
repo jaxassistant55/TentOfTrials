@@ -9,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
 struct Cli {
-
     #[arg(short, long, default_value = "node-0")]
     node_id: String,
 
@@ -21,6 +20,22 @@ struct Cli {
 
     #[arg(short, long, default_value = "/etc/tent/config.toml")]
     config: String,
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    tokio::select! {
+        _ = sigterm.recv() => Ok("SIGTERM"),
+        _ = tokio::signal::ctrl_c() => Ok("SIGINT"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c().await?;
+    Ok("SIGINT")
 }
 
 #[tokio::main]
@@ -54,18 +69,15 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
-
-    tokio::select! {
-        _ = signal.recv() => {
-            tracing::info!("received SIGTERM, initiating graceful shutdown");
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received SIGINT, initiating graceful shutdown");
-        }
-    }
+    let signal_name = wait_for_shutdown_signal().await?;
+    tracing::info!(
+        signal = signal_name,
+        "shutdown signal received, initiating graceful shutdown"
+    );
+    tracing::info!(
+        accepting_new_work = false,
+        "shutdown gate closed to new work"
+    );
 
     broker.disconnect().await?;
     discovery.withdraw(&cli.node_id).await?;

@@ -310,3 +310,31 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Backend Signal Shutdown Harness
+
+The backend includes a lightweight integration harness for graceful shutdown
+signals. It starts the real `tent-backend` binary with the default in-memory
+configuration, waits until the process reaches the main loop, sends `SIGINT`,
+and verifies the shutdown lifecycle in the captured JSON logs.
+
+Run it from the repository root on Unix-like systems:
+
+```bash
+cd backend
+cargo test --test signal_shutdown_harness -- --nocapture
+```
+
+The harness fails clearly if the backend exits before the shutdown flow begins.
+It asserts all of the following log messages:
+
+- `all subsystems initialized successfully, entering main loop`
+- `shutdown signal received, initiating graceful shutdown`
+- `shutdown gate closed to new work` with `accepting_new_work=false`
+- `shutdown complete`
+
+The harness is gated with `cfg(unix)` because it exercises a real Unix signal
+path with `kill -INT <pid>`. On Windows, build and unit tests still compile the
+backend signal handling path, but this integration harness is skipped because
+Windows console control events are not delivered the same way to child
+processes spawned by Rust tests.

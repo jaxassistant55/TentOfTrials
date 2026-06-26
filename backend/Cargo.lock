@@ -1571,6 +1571,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "cc",
  "chrono",
  "clap",
  "dashmap",

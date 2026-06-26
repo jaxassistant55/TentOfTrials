@@ -36,6 +36,8 @@
 pub mod bridge;
 pub mod ffi;
 pub mod legacy;
+#[cfg(windows)]
+mod stubs;
 pub mod types;
 
 // Re-export commonly used types
