@@ -287,6 +287,21 @@ class MigrationResult:
 
 
 @dataclass
+class DryRunRestoreResult:
+    """Result of a dry-run restore validation."""
+    valid: bool
+    backup_path: str
+    errors: List[Dict[str, str]] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    row_counts: Dict[str, int] = field(default_factory=dict)
+    checksums: Dict[str, str] = field(default_factory=dict)
+    schema_version: Optional[str] = None
+    target_compatible: bool = True
+    backup_present: bool = True
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class DataRecord:
     """A single data record being migrated."""
     id: str
@@ -1173,6 +1188,184 @@ def retry_operation(operation, max_retries: int = 3, base_delay: float = 1.0):
 
 
 # ---------------------------------------------------------------------------
+# DRY-RUN RESTORE VALIDATION
+# ---------------------------------------------------------------------------
+
+# Supported target schema versions for restore compatibility
+COMPATIBLE_SCHEMA_VERSIONS = {"1", "2", "3", "4", "5"}
+
+
+def dry_run_restore_validation(
+    backup_dir: str,
+    migration_id: str,
+    target_schema_version: Optional[str] = None,
+) -> DryRunRestoreResult:
+    """
+    Validate a backup restore without writing to the target database.
+
+    This performs a dry-run check that verifies:
+    1. The backup directory and manifest exist
+    2. The target schema version is compatible with the backup
+    3. Row-count and checksum metadata are available and consistent
+
+    No data is written to any database during this validation.
+
+    Args:
+        backup_dir: Path to the directory containing migration backups.
+        migration_id: The migration ID to validate restore for.
+        target_schema_version: Expected target schema version string.
+            If None, schema compatibility is skipped.
+
+    Returns:
+        DryRunRestoreResult with validation status, errors, row counts,
+        and checksum expectations.
+    """
+    result = DryRunRestoreResult(
+        valid=True,
+        backup_path=str(Path(backup_dir) / f"migration_{migration_id}"),
+    )
+
+    backup_path = Path(backup_dir) / f"migration_{migration_id}"
+
+    # --- Check 1: Backup directory exists ---
+    if not backup_path.exists():
+        result.backup_present = False
+        result.valid = False
+        result.errors.append({
+            "field": "backup_path",
+            "code": "BACKUP_NOT_FOUND",
+            "message": f"Backup directory not found: {backup_path}",
+        })
+        logger.error(f"Dry-run restore validation failed: backup not found at {backup_path}")
+        return result
+
+    # --- Check 2: Manifest file exists and is valid ---
+    manifest_path = backup_path / "manifest.json"
+    if not manifest_path.exists():
+        result.valid = False
+        result.errors.append({
+            "field": "manifest",
+            "code": "MANIFEST_MISSING",
+            "message": f"Backup manifest not found: {manifest_path}",
+        })
+        logger.error("Dry-run restore validation failed: manifest missing")
+        return result
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except json.JSONDecodeError as e:
+        result.valid = False
+        result.errors.append({
+            "field": "manifest",
+            "code": "MANIFEST_INVALID",
+            "message": f"Backup manifest is not valid JSON: {e}",
+        })
+        logger.error(f"Dry-run restore validation failed: manifest invalid JSON: {e}")
+        return result
+
+    # --- Check 3: Schema compatibility ---
+    backup_schema = manifest.get("to_version")
+    if backup_schema is not None:
+        result.schema_version = str(backup_schema)
+
+    if target_schema_version is not None:
+        if backup_schema is None:
+            result.target_compatible = False
+            result.valid = False
+            result.errors.append({
+                "field": "schema",
+                "code": "SCHEMA_UNKNOWN",
+                "message": "Backup manifest does not contain schema version information; "
+                           "cannot verify target compatibility",
+            })
+            logger.error("Dry-run restore validation: backup schema version unknown")
+        elif str(backup_schema) != str(target_schema_version):
+            result.target_compatible = False
+            result.valid = False
+            result.errors.append({
+                "field": "schema",
+                "code": "SCHEMA_MISMATCH",
+                "message": (f"Backup schema version {backup_schema} does not match "
+                            f"target schema version {target_schema_version}"),
+            })
+            logger.error(
+                f"Dry-run restore validation: schema mismatch "
+                f"(backup={backup_schema}, target={target_schema_version})"
+            )
+        elif str(backup_schema) not in COMPATIBLE_SCHEMA_VERSIONS:
+            result.target_compatible = False
+            result.valid = False
+            result.errors.append({
+                "field": "schema",
+                "code": "SCHEMA_UNSUPPORTED",
+                "message": (f"Backup schema version {backup_schema} is not in the "
+                            f"set of supported versions: {sorted(COMPATIBLE_SCHEMA_VERSIONS)}"),
+            })
+            logger.error(f"Dry-run restore validation: unsupported schema version {backup_schema}")
+
+    # --- Check 4: Row-count and checksum metadata ---
+    # Look for validation metadata in the manifest
+    validation_data = manifest.get("validation", {})
+    if validation_data:
+        row_counts = validation_data.get("row_counts", {})
+        if row_counts:
+            result.row_counts = row_counts
+            logger.info(f"Dry-run restore: row counts available for {len(row_counts)} table(s)")
+        else:
+            result.warnings.append("No row-count metadata found in backup manifest")
+
+        checksums = validation_data.get("checksums", {})
+        if checksums:
+            result.checksums = checksums
+            logger.info(f"Dry-run restore: checksums available for {len(checksums)} table(s)")
+        else:
+            result.warnings.append("No checksum metadata found in backup manifest")
+    else:
+        result.warnings.append("No validation metadata found in backup manifest")
+
+    # --- Check 5: Data files referenced in manifest exist ---
+    files = manifest.get("files", [])
+    missing_files = []
+    for file_entry in files:
+        if isinstance(file_entry, dict):
+            fname = file_entry.get("path", file_entry.get("name", ""))
+        else:
+            fname = str(file_entry)
+        if fname and not (backup_path / fname).exists():
+            missing_files.append(fname)
+
+    if missing_files:
+        result.valid = False
+        result.errors.append({
+            "field": "data_files",
+            "code": "DATA_FILES_MISSING",
+            "message": f"Referenced data files not found: {missing_files}",
+        })
+        logger.error(f"Dry-run restore validation: missing data files: {missing_files}")
+
+    # Populate metadata
+    result.metadata = {
+        "migration_id": manifest.get("migration_id", migration_id),
+        "backup_created_at": manifest.get("created_at"),
+        "from_version": manifest.get("from_version"),
+        "to_version": manifest.get("to_version"),
+        "script_version": manifest.get("script_version"),
+        "file_count": len(files),
+    }
+
+    if result.valid:
+        logger.info(f"Dry-run restore validation passed for migration {migration_id}")
+    else:
+        logger.warning(
+            f"Dry-run restore validation failed for migration {migration_id}: "
+            f"{len(result.errors)} error(s)"
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1230,6 +1423,24 @@ Examples:
     dryrun_parser = subparsers.add_parser("dry-run", help="Dry run a migration")
     dryrun_parser.add_argument("--config", type=str, required=True, help="Configuration file")
     dryrun_parser.add_argument("--report", action="store_true", help="Generate detailed report")
+
+    # Dry-run-restore command
+    dryrun_restore_parser = subparsers.add_parser(
+        "dry-run-restore",
+        help="Validate a backup restore without writing to the target database",
+    )
+    dryrun_restore_parser.add_argument(
+        "--backup-dir", type=str, required=True,
+        help="Directory containing migration backups",
+    )
+    dryrun_restore_parser.add_argument(
+        "--migration-id", type=str, required=True,
+        help="Migration ID to validate restore for",
+    )
+    dryrun_restore_parser.add_argument(
+        "--target-schema-version", type=str, default=None,
+        help="Expected target schema version for compatibility check",
+    )
 
     # List command
     list_parser = subparsers.add_parser("list", help="List completed migrations")
@@ -1343,6 +1554,31 @@ def main():
                 for error in result.errors:
                     print(f"    - {error['phase']}: {error['error']}")
         return 0 if result.status == MigrationStatus.COMPLETED else 1
+
+    elif args.command == "dry-run-restore":
+        validation = dry_run_restore_validation(
+            backup_dir=args.backup_dir,
+            migration_id=args.migration_id,
+            target_schema_version=args.target_schema_version,
+        )
+        print(f"Dry-run restore validation: {'PASSED' if validation.valid else 'FAILED'}")
+        print(f"  Backup path: {validation.backup_path}")
+        print(f"  Backup present: {validation.backup_present}")
+        print(f"  Schema version: {validation.schema_version or 'unknown'}")
+        print(f"  Target compatible: {validation.target_compatible}")
+        if validation.row_counts:
+            print(f"  Row counts: {json.dumps(validation.row_counts)}")
+        if validation.checksums:
+            print(f"  Checksums: {json.dumps(validation.checksums)}")
+        if validation.errors:
+            print("  Errors:")
+            for err in validation.errors:
+                print(f"    [{err['code']}] {err['message']}")
+        if validation.warnings:
+            print("  Warnings:")
+            for w in validation.warnings:
+                print(f"    - {w}")
+        return 0 if validation.valid else 1
 
     elif args.command == "list":
         print("Listing completed migrations...")

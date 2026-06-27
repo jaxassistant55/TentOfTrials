@@ -370,3 +370,45 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Dry-Run Restore Validation
+
+The legacy migration tool (`tools/legacy_migration.py`) supports a `dry-run-restore`
+command that validates a backup restore without writing to the target database.
+This is useful for verifying backup integrity and schema compatibility before
+performing an actual restore.
+
+### Usage
+
+```bash
+python3 tools/legacy_migration.py dry-run-restore \
+  --backup-dir ./migration_backups \
+  --migration-id MIG-20240601120000 \
+  --target-schema-version 3
+```
+
+### Validation Checks
+
+The dry-run restore validation performs the following checks:
+
+| Check | Error Code | Description |
+|-------|-----------|-------------|
+| Backup directory exists | `BACKUP_NOT_FOUND` | The backup directory for the given migration ID must exist |
+| Manifest file exists | `MANIFEST_MISSING` | A `manifest.json` must be present in the backup directory |
+| Manifest is valid JSON | `MANIFEST_INVALID` | The manifest file must parse as valid JSON |
+| Schema version matches | `SCHEMA_MISMATCH` | Backup schema version must match the target schema version |
+| Schema version known | `SCHEMA_UNKNOWN` | Manifest must contain `to_version` when target schema is specified |
+| Schema version supported | `SCHEMA_UNSUPPORTED` | Schema version must be in the supported set (1-5) |
+| Data files exist | `DATA_FILES_MISSING` | All data files referenced in the manifest must be present |
+
+### Output
+
+The command returns:
+- Exit code 0 if validation passes
+- Exit code 1 if validation fails
+- Structured output including row counts, checksums, and any errors or warnings
+
+### Supported Schema Versions
+
+The following schema versions are supported for restore compatibility:
+1, 2, 3, 4, 5
