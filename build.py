@@ -211,6 +211,14 @@ MODULES = [
         build_dir=ROOT / "market" / "market",
     ),
     Module(
+        name="market-readiness-tests",
+        language="Go",
+        dir=ROOT / "market",
+        build_cmd=["go", "test", "./gateway", "-run", "TestReadinessEndpoint", "-count=1"],
+        clean_cmd=["echo", "Go readiness tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="frailbox",
         language="C",
         dir=ROOT / "frailbox",
