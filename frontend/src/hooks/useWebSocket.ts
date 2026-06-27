@@ -1,28 +1,3 @@
-// @ts-nocheck - TODO: Fix types for v2. See V2-619.
-/**
- * Hook for managing WebSocket connections with automatic reconnection,
- * heartbeat, queue management, and multiplexed subscriptions.
- *
- * This hook wraps the native WebSocket API with:
- * - Exponential backoff reconnection with jitter
- * - Configurable heartbeat (ping/pong)
- * - Message queue for offline messages
- * - Subscription management for multiplexed channels
- * - Connection state tracking
- * - Automatic cleanup on unmount
- *
- * The reconnection strategy uses truncated exponential backoff:
- *   delay = min(base_delay * 2^attempt, max_delay) + random(0, jitter_ms)
- *
- * TODO: Add support for WebSocket compression (permessage-deflate).
- * The extension is supported by the server but not requested by the client.
- * Enabling it would reduce bandwidth for verbose message types by ~60%.
- * The extension negotiation was implemented but then removed because it
- * caused compatibility issues with an older load balancer version.
- * The load balancer was upgraded in Q1 2024, so compression can now be
- * re-enabled. The configuration flag was added but never flipped.
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // ---------------------------------------------------------------------------
@@ -74,6 +49,23 @@ export interface WSState {
   totalMessagesReceived: number;
   errors: number;
   latencyMs: number | null;
+  /** Timestamp (ms) of the most recent successful connection. Null if never connected. */
+  lastConnectedAt: number | null;
+  /** Reason for the most recent disconnect. Sanitized — never contains raw payloads. */
+  lastDisconnectReason: string | null;
+}
+
+export interface WSConnectionMetrics {
+  /** Number of reconnection attempts since the last successful connection. */
+  reconnectAttempt: number;
+  /** Timestamp (ms) of the most recent successful connection. */
+  lastConnectedAt: number | null;
+  /** Sanitized reason for the most recent disconnect. */
+  lastDisconnectReason: string | null;
+  /** Total successful connections made (cumulative). */
+  totalConnections: number;
+  /** Total disconnects (clean or otherwise). */
+  totalDisconnects: number;
 }
 
 interface QueuedMessage {
@@ -95,6 +87,18 @@ const DEFAULT_OPTIONS: Required<Omit<WSOptions, 'url' | 'protocols' | 'onOpen' |
   debug: false,
 };
 
+/** Sanitize a close reason to avoid leaking sensitive data in metrics. */
+function sanitizeCloseReason(reason: string | undefined, code: number): string {
+  if (!reason || reason.length === 0) {
+    return `code:${code}`;
+  }
+  // Strip any long text that might contain payloads or tokens
+  const trimmed = reason.slice(0, 64);
+  // Mask anything that looks like a secret or token
+  const masked = trimmed.replace(/[a-zA-Z0-9_-]{24,}/g, '[REDACTED]');
+  return masked || `code:${code}`;
+}
+
 export function useWebSocket(options: WSOptions) {
   const mergedOptions = { ...DEFAULT_OPTIONS, ...options };
   const wsRef = useRef<WebSocket | null>(null);
@@ -108,6 +112,12 @@ export function useWebSocket(options: WSOptions) {
   const messageIdRef = useRef(0);
   const pingStartRef = useRef(0);
 
+  // Metrics refs (not in React state to avoid unnecessary re-renders)
+  const totalConnectionsRef = useRef(0);
+  const totalDisconnectsRef = useRef(0);
+  const lastDisconnectReasonRef = useRef<string | null>(null);
+  const lastConnectedAtRef = useRef<number | null>(null);
+
   const [state, setState] = useState<WSState>({
     connectionState: 'disconnected',
     lastMessage: null,
@@ -118,11 +128,21 @@ export function useWebSocket(options: WSOptions) {
     totalMessagesReceived: 0,
     errors: 0,
     latencyMs: null,
+    lastConnectedAt: null,
+    lastDisconnectReason: null,
   });
 
   const updateState = useCallback((partial: Partial<WSState>) => {
     setState(prev => ({ ...prev, ...partial }));
   }, []);
+
+  const getConnectionMetrics = useCallback((): WSConnectionMetrics => ({
+    reconnectAttempt: reconnectAttemptRef.current,
+    lastConnectedAt: lastConnectedAtRef.current,
+    lastDisconnectReason: lastDisconnectReasonRef.current,
+    totalConnections: totalConnectionsRef.current,
+    totalDisconnects: totalDisconnectsRef.current,
+  }), []);
 
   const sendMessage = useCallback((message: WSMessage) => {
     const ws = wsRef.current;
@@ -132,13 +152,8 @@ export function useWebSocket(options: WSOptions) {
       ws.send(msgStr);
       updateState({ totalMessagesSent: state.totalMessagesSent + 1 });
     } else {
-      // Queue message for later delivery
       if (messageQueueRef.current.length < mergedOptions.messageQueueSize) {
-        messageQueueRef.current.push({
-          message,
-          timestamp: Date.now(),
-          retries: 0,
-        });
+        messageQueueRef.current.push({ message, timestamp: Date.now(), retries: 0 });
         updateState({ queueSize: messageQueueRef.current.length });
       } else if (mergedOptions.debug) {
         console.warn('[WS] Message queue full, dropping message:', message.type);
@@ -164,11 +179,7 @@ export function useWebSocket(options: WSOptions) {
     updateState({ subscriptions: subscriptionsRef.current.size });
 
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      sendMessage({
-        type: 'unsubscribe',
-        channel,
-        payload: null,
-      });
+      sendMessage({ type: 'unsubscribe', channel, payload: null });
     }
   }, [sendMessage, updateState]);
 
@@ -186,50 +197,43 @@ export function useWebSocket(options: WSOptions) {
       ws.onopen = (event) => {
         if (!mountedRef.current) return;
         reconnectAttemptRef.current = 0;
-        updateState({ connectionState: 'connected', reconnectAttempt: 0 });
-
-        // Resubscribe to all channels
-        subscriptionsRef.current.forEach((sub, channel) => {
-          sendMessage({
-            type: 'subscribe',
-            channel,
-            payload: sub.filter || {},
-          });
+        totalConnectionsRef.current++;
+        const now = Date.now();
+        lastConnectedAtRef.current = now;
+        updateState({
+          connectionState: 'connected',
+          reconnectAttempt: 0,
+          lastConnectedAt: now,
         });
 
-        // Flush queued messages
+        subscriptionsRef.current.forEach((sub, channel) => {
+          sendMessage({ type: 'subscribe', channel, payload: sub.filter || {} });
+        });
+
         while (messageQueueRef.current.length > 0) {
           const queued = messageQueueRef.current.shift()!;
           sendMessage(queued.message);
         }
         updateState({ queueSize: 0 });
 
-        // Start ping interval
         startPing();
-
         mergedOptions.onOpen?.(event);
       };
 
       ws.onmessage = (event) => {
         if (!mountedRef.current) return;
-
         try {
           const message: WSMessage = JSON.parse(event.data);
-
-          // Handle pong response
           if (message.type === 'pong') {
             const latency = Date.now() - pingStartRef.current;
             updateState({ latencyMs: latency });
             clearPongTimeout();
             return;
           }
-
           updateState({
             lastMessage: message,
             totalMessagesReceived: state.totalMessagesReceived + 1,
           });
-
-          // Route to channel subscribers
           if (message.channel) {
             const sub = subscriptionsRef.current.get(message.channel);
             if (sub) {
@@ -242,8 +246,6 @@ export function useWebSocket(options: WSOptions) {
               }
             }
           }
-
-          // Route to global message handler
           mergedOptions.onMessage?.(message);
         } catch (err) {
           if (mergedOptions.debug) {
@@ -256,7 +258,13 @@ export function useWebSocket(options: WSOptions) {
         if (!mountedRef.current) return;
         wsRef.current = null;
         stopPing();
-        updateState({ connectionState: 'disconnected' });
+        totalDisconnectsRef.current++;
+        const sanitizedReason = sanitizeCloseReason(event.reason, event.code);
+        lastDisconnectReasonRef.current = sanitizedReason;
+        updateState({
+          connectionState: 'disconnected',
+          lastDisconnectReason: sanitizedReason,
+        });
         mergedOptions.onClose?.(event);
         scheduleReconnect();
       };
@@ -294,20 +302,15 @@ export function useWebSocket(options: WSOptions) {
       updateState({ connectionState: 'error' });
       return;
     }
-
     const delay = Math.min(
       mergedOptions.reconnectBaseDelay * Math.pow(2, reconnectAttemptRef.current),
       mergedOptions.reconnectMaxDelay
     ) + Math.random() * mergedOptions.reconnectJitter;
-
     reconnectAttemptRef.current++;
-
     if (mergedOptions.debug) {
       console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttemptRef.current})`);
     }
-
     updateState({ connectionState: 'reconnecting', reconnectAttempt: reconnectAttemptRef.current });
-
     reconnectTimerRef.current = setTimeout(() => {
       if (mountedRef.current) connect();
     }, delay);
@@ -319,8 +322,6 @@ export function useWebSocket(options: WSOptions) {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         pingStartRef.current = Date.now();
         wsRef.current.send(JSON.stringify({ type: 'ping' }));
-
-        // Set pong timeout
         pongTimerRef.current = setTimeout(() => {
           if (mergedOptions.debug) {
             console.warn('[WS] Pong timeout, closing connection');
@@ -349,13 +350,7 @@ export function useWebSocket(options: WSOptions) {
 
   const send = useCallback((type: string, payload: unknown, channel?: string) => {
     const id = `msg_${++messageIdRef.current}`;
-    sendMessage({
-      id,
-      type,
-      channel,
-      payload,
-      timestamp: Date.now(),
-    });
+    sendMessage({ id, type, channel, payload, timestamp: Date.now() });
     return id;
   }, [sendMessage]);
 
@@ -378,5 +373,6 @@ export function useWebSocket(options: WSOptions) {
     subscribe,
     unsubscribe,
     isConnected: wsRef.current?.readyState === WebSocket.OPEN,
+    getConnectionMetrics,
   };
 }
