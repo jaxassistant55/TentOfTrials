@@ -84,6 +84,17 @@ Callbacks from an older socket generation are ignored after a newer connection
 has been created, so stale close, error, and message events cannot schedule new
 reconnects or update current hook state.
 
+### Frontend WebSocket Metrics
+
+Frontend socket diagnostics expose a lightweight `connectionMetrics` object
+without tokens or message payloads:
+
+| Field | Description |
+|-------|-------------|
+| `reconnectAttemptCount` | Number of reconnect attempts scheduled by the current hook instance. |
+| `lastDisconnectReason` | Close reason text or a compact close-code summary, never the full payload. |
+| `lastConnectedAt` | Unix timestamp in milliseconds from the last successful socket open. |
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
