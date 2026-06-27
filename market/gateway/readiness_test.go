@@ -26,7 +26,7 @@ func TestReadinessStateStoreTransitions(t *testing.T) {
 }
 
 func TestReadinessEndpointReturnsReadyByDefault(t *testing.T) {
-	gateway := newReadinessDrainTestGateway()
+	gateway := newReadinessTestGateway()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
 
@@ -35,11 +35,25 @@ func TestReadinessEndpointReturnsReadyByDefault(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	assertReadinessDrainResponse(t, recorder, map[string]string{"status": "ready"})
+	assertReadinessResponse(t, recorder, map[string]string{"status": "ready"})
+}
+
+func TestReadinessEndpointReturnsNotReadyWhenHealthFails(t *testing.T) {
+	gateway := newReadinessTestGateway()
+	gateway.health.Store(false)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+
+	gateway.buildHandler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	assertReadinessResponse(t, recorder, map[string]string{"status": "not ready"})
 }
 
 func TestReadinessEndpointReturnsNotReadyWhenDraining(t *testing.T) {
-	gateway := newReadinessDrainTestGateway()
+	gateway := newReadinessTestGateway()
 	gateway.MarkDraining()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
@@ -49,14 +63,14 @@ func TestReadinessEndpointReturnsNotReadyWhenDraining(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
 	}
-	assertReadinessDrainResponse(t, recorder, map[string]string{
+	assertReadinessResponse(t, recorder, map[string]string{
 		"status": "not ready",
 		"state":  "draining",
 	})
 }
 
 func TestReadinessEndpointReturnsReadyAfterDrainTransition(t *testing.T) {
-	gateway := newReadinessDrainTestGateway()
+	gateway := newReadinessTestGateway()
 	gateway.MarkDraining()
 	gateway.MarkReady()
 	recorder := httptest.NewRecorder()
@@ -67,16 +81,16 @@ func TestReadinessEndpointReturnsReadyAfterDrainTransition(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	assertReadinessDrainResponse(t, recorder, map[string]string{"status": "ready"})
+	assertReadinessResponse(t, recorder, map[string]string{"status": "ready"})
 }
 
-func newReadinessDrainTestGateway() *Gateway {
+func newReadinessTestGateway() *Gateway {
 	config := DefaultGatewayConfig()
 	config.LogRequests = false
 	return NewGateway(config)
 }
 
-func assertReadinessDrainResponse(t *testing.T, recorder *httptest.ResponseRecorder, want map[string]string) {
+func assertReadinessResponse(t *testing.T, recorder *httptest.ResponseRecorder, want map[string]string) {
 	t.Helper()
 
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {

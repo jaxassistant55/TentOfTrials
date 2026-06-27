@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-27T13:58:32.252407+00:00",
+  "commit": "d2d077f2",
+  "diagnostic_logd": [
+    "diagnostic/build-d2d077f2-part001.logd",
+    "diagnostic/build-d2d077f2-part002.logd",
+    "diagnostic/build-d2d077f2-part003.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "7ab12040e4b831b79bee",
+  "decrypt_command": "encryptly unpack diagnostic/build-d2d077f2.logd <outdir> --password 7ab12040e4b831b79bee",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "market-readiness-tests",
+      "status": "PASS",
+      "elapsed_seconds": 0.475,
+      "artifact": null,
+      "output": "ok  \tgithub.com/tent-of-trials/market/gateway\t0.240s"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-d2d077f2-part001.logd, diagnostic/build-d2d077f2-part002.logd, diagnostic/build-d2d077f2-part003.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
