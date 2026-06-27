@@ -37,6 +37,31 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Market Gateway Readiness Drain
+
+The market gateway keeps liveness and readiness separate. `/health/ready`
+returns the existing ready response while the gateway can receive traffic:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+When an operator or shutdown path marks the gateway as draining, readiness
+returns HTTP 503 so deployment checks can remove it from rotation before
+connections are closed:
+
+```json
+{
+  "status": "not ready",
+  "state": "draining"
+}
+```
+
+The liveness endpoint remains independent and should continue to report the
+process as alive while the gateway drains in-flight work.
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the

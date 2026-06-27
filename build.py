@@ -220,6 +220,14 @@ MODULES = [
         build_dir=ROOT / "market" / "market",
     ),
     Module(
+        name="market-readiness-drain-tests",
+        language="Go",
+        dir=ROOT / "market",
+        build_cmd=["go", "test", "./gateway", "-run", "TestReadiness", "-count=1"],
+        clean_cmd=["echo", "Go readiness drain tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="frailbox",
         language="C",
         dir=ROOT / "frailbox",
