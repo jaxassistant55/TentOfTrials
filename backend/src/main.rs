@@ -3,7 +3,7 @@ use clap::Parser;
 use tent_backend::discovery::ServiceDiscovery;
 use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
-use tent_backend::shutdown::{ShutdownMetrics, DEFAULT_SHUTDOWN_GRACE_PERIOD};
+use tent_backend::shutdown::ShutdownMetrics;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -47,7 +47,8 @@ async fn main() -> Result<()> {
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
-    let mut shutdown_metrics = ShutdownMetrics::new(DEFAULT_SHUTDOWN_GRACE_PERIOD);
+    let shutdown_grace = tent_backend::config::shutdown_grace_duration_from_env()?;
+    let mut shutdown_metrics = ShutdownMetrics::new(shutdown_grace);
 
     registry.initialize().await?;
     discovery.announce(&cli.node_id).await?;
@@ -77,9 +78,31 @@ async fn main() -> Result<()> {
         "shutdown metrics snapshot"
     );
 
-    broker.disconnect().await?;
-    discovery.withdraw(&cli.node_id).await?;
-    registry.shutdown().await?;
+    let shutdown_result = tokio::time::timeout(shutdown_grace, async {
+        broker.disconnect().await?;
+        discovery.withdraw(&cli.node_id).await?;
+        registry.shutdown().await
+    })
+    .await;
+
+    match shutdown_result {
+        Ok(result) => result?,
+        Err(_) => {
+            shutdown_metrics.mark_timed_out();
+            let snapshot = shutdown_metrics.snapshot();
+            tracing::error!(
+                shutdown_started = snapshot.shutdown_started,
+                grace_period_seconds = snapshot.grace_period_seconds,
+                elapsed_seconds = snapshot.elapsed_seconds,
+                terminal_status = snapshot.terminal_status.as_str(),
+                "shutdown metrics snapshot"
+            );
+            return Err(anyhow::anyhow!(
+                "shutdown exceeded {} second grace period",
+                shutdown_grace.as_secs()
+            ));
+        }
+    }
 
     shutdown_metrics.mark_completed();
     let snapshot = shutdown_metrics.snapshot();
