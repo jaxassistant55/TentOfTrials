@@ -207,6 +207,20 @@ after reviewing the dry-run output. The apply flag deletes stale diagnostic
 metadata and log chunks whose commit prefix does not match the current commit.
 Artifacts for the current commit are always preserved.
 
+### Diagnostic Retention Report
+
+Diagnostic build artifacts are stored under `diagnostic/` as
+`build-<commit>.json`, `build-<commit>.logd`, or split
+`build-<commit>-partNNN.logd` chunks.
+
+Run `python3 build.py --diagnostic-retention-report` to print a read-only JSON
+summary of the diagnostic artifacts currently present in the tree. The report
+includes the current commit prefix, current commit artifact names, older
+artifact names, total artifact count, total bytes, and per-artifact metadata.
+
+The command is safe to run in CI because it only reads `diagnostic/` and never
+deletes, rewrites, stages, or commits files.
+
 ### Recovery Procedure
 
 1. Identify the recovery point (time or transaction ID)

@@ -173,6 +173,52 @@ def print_diagnostic_cleanup_results(
         print(f"    {color(action, Colors.YELLOW)} {display_path} ({candidate.reason})")
 
 
+def _diagnostic_display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def build_diagnostic_retention_report(
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+) -> dict:
+    active_commit = (current_commit or current_commit_id()).lower()
+    artifacts = []
+
+    if diagnostic_dir.exists():
+        for artifact in sorted(diagnostic_dir.glob("build-*")):
+            if not artifact.is_file():
+                continue
+            artifact_commit = _diagnostic_commit_from_artifact(artifact)
+            if artifact_commit is None:
+                continue
+            size_bytes = artifact.stat().st_size
+            artifacts.append(
+                {
+                    "name": artifact.name,
+                    "path": _diagnostic_display_path(artifact),
+                    "commit": artifact_commit,
+                    "bytes": size_bytes,
+                    "current": artifact_commit == active_commit,
+                }
+            )
+
+    current_artifacts = [artifact["name"] for artifact in artifacts if artifact["current"]]
+    older_artifacts = [artifact["name"] for artifact in artifacts if not artifact["current"]]
+
+    return {
+        "current_commit": active_commit,
+        "diagnostic_dir": _diagnostic_display_path(diagnostic_dir),
+        "total_artifact_count": len(artifacts),
+        "total_bytes": sum(artifact["bytes"] for artifact in artifacts),
+        "current_artifacts": current_artifacts,
+        "older_artifacts": older_artifacts,
+        "artifacts": artifacts,
+    }
+
+
 @dataclass
 class Module:
     name: str
@@ -324,6 +370,14 @@ MODULES = [
         language="Python",
         dir=ROOT / "tools",
         build_cmd=["python3", "test_diagnostic_cleanup.py"],
+        clean_cmd=["echo", "Python has no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="diagnostic-retention",
+        language="Python",
+        dir=ROOT / "tools",
+        build_cmd=["python3", "test_diagnostic_retention_report.py"],
         clean_cmd=["echo", "Python has no build artifacts to clean"],
         build_dir=None,
     ),
@@ -959,6 +1013,8 @@ Examples:
                                       Dry-run stale diagnostic cleanup
   python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup
                                       Delete stale diagnostic artifacts
+  python3 build.py --diagnostic-retention-report
+                                      Print diagnostic artifact retention JSON
 
 Diagnostic bundle:
   python3 build.py
@@ -993,10 +1049,18 @@ Diagnostic bundle:
         "--apply-diagnostic-cleanup", action="store_true",
         help="Delete stale diagnostic artifacts found by --cleanup-diagnostics",
     )
+    parser.add_argument(
+        "--diagnostic-retention-report", action="store_true",
+        help="Print a read-only JSON summary of diagnostic artifact retention",
+    )
 
     args = parser.parse_args()
     if args.apply_diagnostic_cleanup and not args.cleanup_diagnostics:
         parser.error("--apply-diagnostic-cleanup requires --cleanup-diagnostics")
+
+    if args.diagnostic_retention_report:
+        print(json.dumps(build_diagnostic_retention_report(), indent=2, sort_keys=True))
+        return 0
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
