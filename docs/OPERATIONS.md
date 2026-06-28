@@ -37,6 +37,64 @@ The health check returns a 200 OK response with a JSON body:
 }
 ```
 
+### Market Gateway Readiness
+
+The market gateway exposes readiness separately from liveness at
+`/health/ready` on port 8080. Use this endpoint in deployment checks before
+sending traffic to the gateway:
+
+```sh
+curl -i http://localhost:8080/health/ready
+```
+
+When the gateway is ready, the endpoint returns HTTP 200:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+When the gateway health flag is not ready, the endpoint returns HTTP 503:
+
+```json
+{
+  "status": "not ready"
+}
+```
+
+When an operator or shutdown path marks the gateway as draining, readiness also
+returns HTTP 503 so deployment checks can remove it from rotation before
+connections are closed:
+
+```json
+{
+  "status": "not ready",
+  "state": "draining"
+}
+```
+
+The liveness endpoint remains independent and should continue to report the
+process as alive while the gateway drains in-flight work.
+
+### Frontend WebSocket Lifecycle
+
+Frontend WebSocket hooks must clear pending reconnect timers during unmount.
+Callbacks from an older socket generation are ignored after a newer connection
+has been created, so stale close, error, and message events cannot schedule new
+reconnects or update current hook state.
+
+### Frontend WebSocket Metrics
+
+Frontend socket diagnostics expose a lightweight `connectionMetrics` object
+without tokens or message payloads:
+
+| Field | Description |
+|-------|-------------|
+| `reconnectAttemptCount` | Number of reconnect attempts scheduled by the current hook instance. |
+| `lastDisconnectReason` | Close reason text or a compact close-code summary, never the full payload. |
+| `lastConnectedAt` | Unix timestamp in milliseconds from the last successful socket open. |
+
 ### Prometheus Metrics
 
 Each service exposes Prometheus metrics at `/metrics` on the same port as the
@@ -57,6 +115,40 @@ Key metrics to monitor:
 | `queue_depth` | Gauge | Message queue depth | > 1000 | > 10000 |
 | `goroutine_count` | Gauge | Go routine count | > 5000 | > 10000 |
 | `gc_pause_time_ms` | Histogram | GC pause time | > 100ms | > 500ms |
+
+### Backend Shutdown Metrics Snapshot
+
+The Rust backend records a structured shutdown snapshot when graceful shutdown
+starts and again after cleanup completes. The snapshot is internal status
+telemetry only; it does not include request bodies, credentials, tokens, or
+operator-provided payloads.
+
+| Field | Description |
+|-------|-------------|
+| `shutdown_started` | `true` once the backend has received SIGINT or SIGTERM and entered graceful shutdown. |
+| `grace_period_seconds` | The configured grace window reported in whole seconds. |
+| `elapsed_seconds` | Whole seconds elapsed since shutdown began, or the completed/timeout elapsed duration for terminal states. |
+| `terminal_status` | `not_started`, `draining`, `completed`, or `timed_out`. |
+
+Before shutdown begins, the helper reports `shutdown_started: false`,
+`elapsed_seconds: 0`, and `terminal_status: not_started`. During the drain it
+reports `terminal_status: draining`; once cleanup finishes it reports
+`completed`, and if the grace window is exhausted it reports `timed_out`.
+
+### Backend Shutdown Signal Harness
+
+The backend includes a local signal harness for checking graceful shutdown
+without external services or credentials:
+
+```bash
+sh backend/tests/shutdown_signal_harness.sh
+```
+
+The harness builds the Rust backend, starts it with the default in-memory
+subsystems, waits until it logs that the main loop is ready, sends SIGTERM, and
+then asserts the shutdown-start log, `accepting_new_work=false`, and
+`shutdown complete` are emitted. If the backend exits before the shutdown flow
+starts, the harness prints the captured log and fails.
 
 ### Grafana Dashboards
 
@@ -146,6 +238,55 @@ involves checking that the restored database has the expected row counts and
 that no tables are missing. The row count check was added after an incident
 where a backup was taken while a migration was running, resulting in an
 incomplete backup that restored without error but was missing 3 tables.
+
+### Backend Shutdown Grace Period
+
+The backend shutdown cleanup is bounded by `TOT_SHUTDOWN_GRACE_SECS`.
+
+If `TOT_SHUTDOWN_GRACE_SECS` is unset or empty, the backend uses a 30-second
+default. Valid configured values are whole seconds from `1` through `300`.
+
+Invalid values are rejected during startup:
+
+- `0`
+- negative values
+- values above `300`
+- non-numeric values
+
+When the backend receives `SIGTERM` or `SIGINT`, it attempts to disconnect the
+broker, withdraw service discovery, and stop the registry within the configured
+grace period. If cleanup exceeds the configured period, startup/shutdown returns
+an error so the supervisor can surface the failed graceful shutdown.
+
+### Diagnostic Artifact Cleanup
+
+Diagnostic build artifacts are stored under `diagnostic/` as
+`build-<commit>.json`, `build-<commit>.logd`, or split
+`build-<commit>-partNNN.logd` chunks. Interrupted local runs can leave old
+chunks in place, which makes PR review folders difficult to audit.
+
+Run `python3 build.py --cleanup-diagnostics` to list stale diagnostic artifacts
+without deleting files. Dry-run mode is the default and is safe to use before a
+PR.
+
+Run `python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup` only
+after reviewing the dry-run output. The apply flag deletes stale diagnostic
+metadata and log chunks whose commit prefix does not match the current commit.
+Artifacts for the current commit are always preserved.
+
+### Diagnostic Retention Report
+
+Diagnostic build artifacts are stored under `diagnostic/` as
+`build-<commit>.json`, `build-<commit>.logd`, or split
+`build-<commit>-partNNN.logd` chunks.
+
+Run `python3 build.py --diagnostic-retention-report` to print a read-only JSON
+summary of the diagnostic artifacts currently present in the tree. The report
+includes the current commit prefix, current commit artifact names, older
+artifact names, total artifact count, total bytes, and per-artifact metadata.
+
+The command is safe to run in CI because it only reads `diagnostic/` and never
+deletes, rewrites, stages, or commits files.
 
 ### Log Watchdog Exit Codes
 

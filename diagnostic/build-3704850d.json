@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-27T13:50:44.912764+00:00",
+  "commit": "3704850d",
+  "diagnostic_logd": [
+    "diagnostic/build-3704850d-part001.logd",
+    "diagnostic/build-3704850d-part002.logd",
+    "diagnostic/build-3704850d-part003.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "b8675d46cfbe01a58120",
+  "decrypt_command": "encryptly unpack diagnostic/build-3704850d.logd <outdir> --password b8675d46cfbe01a58120",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "log-watchdog-exit-codes",
+      "status": "PASS",
+      "elapsed_seconds": 0.158,
+      "artifact": null,
+      "output": ""
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-3704850d-part001.logd, diagnostic/build-3704850d-part002.logd, diagnostic/build-3704850d-part003.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

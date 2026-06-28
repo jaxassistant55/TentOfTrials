@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-27T14:31:53.290983+00:00",
+  "commit": "8b8d752b",
+  "diagnostic_logd": [
+    "diagnostic/build-8b8d752b-part001.logd",
+    "diagnostic/build-8b8d752b-part002.logd",
+    "diagnostic/build-8b8d752b-part003.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "d7b736dd2f8dabab6976",
+  "decrypt_command": "encryptly unpack diagnostic/build-8b8d752b.logd <outdir> --password d7b736dd2f8dabab6976",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "frontend-websocket-metrics-tests",
+      "status": "PASS",
+      "elapsed_seconds": 0.174,
+      "artifact": null,
+      "output": "TAP version 13\n# Subtest: connection metrics initial state is empty and safe to expose\nok 1 - connection metrics initial state is empty and safe to expose\n  ---\n  duration_ms: 1.36375\n  type: 'test'\n  ...\n# Subtest: reconnect attempts increment without storing socket payloads\nok 2 - reconnect attempts increment without storing socket payloads\n  ---\n  duration_ms: 0.120583\n  type: 'test'\n  ...\n# Subtest: clean disconnect records only the close reason\nok 3 - clean disconnect records only the close reason\n  ---\n  duration_ms: 0.077625\n  type: 'test'\n  ...\n# Subtest: connected timestamp and stale callback detection are deterministic\nok 4 - connected timestamp and stale callback detection are deterministic\n  ---\n  duration_ms: 0.067834\n  type: 'test'\n  ...\n1..4\n# tests 4\n# suites 0\n# pass 4\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 112.030917"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-8b8d752b-part001.logd, diagnostic/build-8b8d752b-part002.logd, diagnostic/build-8b8d752b-part003.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
