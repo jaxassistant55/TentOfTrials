@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-27T14:20:00.296539+00:00",
+  "commit": "202da236",
+  "diagnostic_logd": [
+    "diagnostic/build-202da236-part001.logd",
+    "diagnostic/build-202da236-part002.logd",
+    "diagnostic/build-202da236-part003.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "ec3573ec4edf3e636a2e",
+  "decrypt_command": "encryptly unpack diagnostic/build-202da236.logd <outdir> --password ec3573ec4edf3e636a2e",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "frontend-websocket-lifecycle-tests",
+      "status": "PASS",
+      "elapsed_seconds": 0.174,
+      "artifact": null,
+      "output": "TAP version 13\n# Subtest: unmount clears a pending reconnect timer before it can run\nok 1 - unmount clears a pending reconnect timer before it can run\n  ---\n  duration_ms: 1.338625\n  type: 'test'\n  ...\n# Subtest: stale socket callbacks are rejected after a newer connection exists\nok 2 - stale socket callbacks are rejected after a newer connection exists\n  ---\n  duration_ms: 0.071125\n  type: 'test'\n  ...\n# Subtest: unmount rejects callbacks from the latest connection generation\nok 3 - unmount rejects callbacks from the latest connection generation\n  ---\n  duration_ms: 0.054875\n  type: 'test'\n  ...\n# Subtest: reconnect timer can fire once and be replaced deterministically\nok 4 - reconnect timer can fire once and be replaced deterministically\n  ---\n  duration_ms: 0.077084\n  type: 'test'\n  ...\n1..4\n# tests 4\n# suites 0\n# pass 4\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 111.95825"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-202da236-part001.logd, diagnostic/build-202da236-part002.logd, diagnostic/build-202da236-part003.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

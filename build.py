@@ -69,6 +69,13 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
     return chunks
 
 
+@dataclass(frozen=True)
+class DiagnosticCleanupCandidate:
+    path: Path
+    commit_id: str
+    reason: str
+
+
 def _diagnostic_commit_from_artifact(path: Path) -> Optional[str]:
     name = path.name
     stem: Optional[str] = None
@@ -97,6 +104,73 @@ def _diagnostic_commit_from_artifact(path: Path) -> Optional[str]:
     if not all(ch in "0123456789abcdef" for ch in commit_id):
         return None
     return commit_id
+
+
+def stale_diagnostic_artifacts(
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+) -> list[DiagnosticCleanupCandidate]:
+    active_commit = (current_commit or current_commit_id()).lower()
+    if not diagnostic_dir.exists():
+        return []
+
+    candidates: list[DiagnosticCleanupCandidate] = []
+    for artifact in sorted(diagnostic_dir.glob("build-*")):
+        if not artifact.is_file():
+            continue
+        artifact_commit = _diagnostic_commit_from_artifact(artifact)
+        if artifact_commit is None or artifact_commit == active_commit:
+            continue
+        candidates.append(
+            DiagnosticCleanupCandidate(
+                path=artifact,
+                commit_id=artifact_commit,
+                reason=f"not current commit {active_commit}",
+            )
+        )
+    return candidates
+
+
+def cleanup_stale_diagnostic_artifacts(
+    *,
+    apply: bool = False,
+    diagnostic_dir: Path = DIAGNOSTIC_DIR,
+    current_commit: Optional[str] = None,
+) -> list[DiagnosticCleanupCandidate]:
+    candidates = stale_diagnostic_artifacts(diagnostic_dir, current_commit)
+    if not apply:
+        return candidates
+
+    diagnostic_root = diagnostic_dir.resolve()
+    for candidate in candidates:
+        resolved = candidate.path.resolve()
+        try:
+            resolved.relative_to(diagnostic_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Refusing to delete outside diagnostic dir: {candidate.path}") from exc
+        if candidate.path.exists():
+            candidate.path.unlink()
+    return candidates
+
+
+def print_diagnostic_cleanup_results(
+    candidates: list[DiagnosticCleanupCandidate],
+    *,
+    apply: bool,
+) -> None:
+    mode = "Applied" if apply else "Dry run"
+    if not candidates:
+        print(f"  {color(mode + ': no stale diagnostic artifacts found.', Colors.GREEN)}")
+        return
+
+    action = "Deleted" if apply else "Would delete"
+    print(f"  {color(mode + ': stale diagnostic artifacts', Colors.BOLD)}")
+    for candidate in candidates:
+        try:
+            display_path = candidate.path.relative_to(ROOT)
+        except ValueError:
+            display_path = candidate.path
+        print(f"    {color(action, Colors.YELLOW)} {display_path} ({candidate.reason})")
 
 
 def _diagnostic_display_path(path: Path) -> str:
@@ -166,6 +240,33 @@ MODULES = [
         env={"CARGO_TERM_COLOR": "always"},
     ),
     Module(
+        name="backend-shutdown-metrics-tests",
+        language="Rust",
+        dir=ROOT / "backend",
+        build_cmd=["cargo", "test", "shutdown_metrics", "--lib"],
+        clean_cmd=["cargo", "clean"],
+        build_dir=ROOT / "backend" / "target",
+        env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
+        name="backend-shutdown-signal-harness",
+        language="Rust",
+        dir=ROOT / "backend",
+        build_cmd=["sh", "tests/shutdown_signal_harness.sh"],
+        clean_cmd=["cargo", "clean"],
+        build_dir=ROOT / "backend" / "target",
+        env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
+        name="backend-shutdown-config-tests",
+        language="Rust",
+        dir=ROOT / "backend",
+        build_cmd=["cargo", "test", "shutdown_grace", "--lib"],
+        clean_cmd=["cargo", "clean"],
+        build_dir=None,
+        env={"CARGO_TERM_COLOR": "always"},
+    ),
+    Module(
         name="frontend",
         language="TypeScript",
         dir=ROOT / "frontend",
@@ -175,12 +276,44 @@ MODULES = [
         env={"NODE_ENV": "production"},
     ),
     Module(
+        name="frontend-websocket-lifecycle-tests",
+        language="TypeScript",
+        dir=ROOT / "frontend",
+        build_cmd=["node", "--experimental-strip-types", "--test", "scripts/test-websocket-lifecycle.mjs"],
+        clean_cmd=["echo", "WebSocket lifecycle tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="frontend-websocket-metrics-tests",
+        language="TypeScript",
+        dir=ROOT / "frontend",
+        build_cmd=["node", "--experimental-strip-types", "--test", "scripts/test-websocket-metrics.mjs"],
+        clean_cmd=["echo", "WebSocket metrics tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="market",
         language="Go",
         dir=ROOT / "market",
         build_cmd=["go", "build", "-o", "market", "."],
         clean_cmd=["rm", "-f", "market"],
         build_dir=ROOT / "market" / "market",
+    ),
+    Module(
+        name="market-readiness-drain-tests",
+        language="Go",
+        dir=ROOT / "market",
+        build_cmd=["go", "test", "./gateway", "-run", "TestReadiness", "-count=1"],
+        clean_cmd=["echo", "Go readiness drain tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="market-readiness-tests",
+        language="Go",
+        dir=ROOT / "market",
+        build_cmd=["go", "test", "./gateway", "-run", "TestReadinessEndpoint", "-count=1"],
+        clean_cmd=["echo", "Go readiness tests have no build artifacts to clean"],
+        build_dir=None,
     ),
     Module(
         name="frailbox",
@@ -231,6 +364,14 @@ MODULES = [
         build_dir=None,
     ),
     Module(
+        name="log-watchdog-exit-codes",
+        language="Perl",
+        dir=ROOT,
+        build_cmd=["sh", "v2/tests/test_log_watchdog_exit_codes.sh"],
+        clean_cmd=["echo", "Perl watchdog tests have no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
         name="nfc-scanner",
         language="Lua",
         dir=ROOT / "frailbox" / "nfc",
@@ -271,6 +412,14 @@ MODULES = [
         language="Python",
         dir=ROOT / "tools",
         build_cmd=["python3", "test_legacy_migration_dry_run.py"],
+        clean_cmd=["echo", "Python has no build artifacts to clean"],
+        build_dir=None,
+    ),
+    Module(
+        name="diagnostic-cleanup",
+        language="Python",
+        dir=ROOT / "tools",
+        build_cmd=["python3", "test_diagnostic_cleanup.py"],
         clean_cmd=["echo", "Python has no build artifacts to clean"],
         build_dir=None,
     ),
@@ -910,6 +1059,10 @@ Examples:
   python3 build.py --clean            Clean all artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
+  python3 build.py --cleanup-diagnostics
+                                      Dry-run stale diagnostic cleanup
+  python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup
+                                      Delete stale diagnostic artifacts
   python3 build.py --diagnostic-retention-report
                                       Print diagnostic artifact retention JSON
 
@@ -939,11 +1092,21 @@ Diagnostic bundle:
         help="List available modules and exit",
     )
     parser.add_argument(
+        "--cleanup-diagnostics", action="store_true",
+        help="List stale diagnostic artifacts without deleting them",
+    )
+    parser.add_argument(
+        "--apply-diagnostic-cleanup", action="store_true",
+        help="Delete stale diagnostic artifacts found by --cleanup-diagnostics",
+    )
+    parser.add_argument(
         "--diagnostic-retention-report", action="store_true",
         help="Print a read-only JSON summary of diagnostic artifact retention",
     )
 
     args = parser.parse_args()
+    if args.apply_diagnostic_cleanup and not args.cleanup_diagnostics:
+        parser.error("--apply-diagnostic-cleanup requires --cleanup-diagnostics")
 
     if args.diagnostic_retention_report:
         print(json.dumps(build_diagnostic_retention_report(), indent=2, sort_keys=True))
@@ -952,6 +1115,11 @@ Diagnostic bundle:
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
+
+    if args.cleanup_diagnostics:
+        candidates = cleanup_stale_diagnostic_artifacts(apply=args.apply_diagnostic_cleanup)
+        print_diagnostic_cleanup_results(candidates, apply=args.apply_diagnostic_cleanup)
+        return 0
 
     if args.list:
         print(f"  {color('Available modules:', Colors.BOLD)}")

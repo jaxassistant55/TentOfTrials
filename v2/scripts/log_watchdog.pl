@@ -80,9 +80,12 @@ my $daemon_mode = 0;
 my $config_file = DEFAULT_CONFIG;
 my $webhook_file = $ENV{'SLACK_WEBHOOK_FILE'} || DEFAULT_WEBHOOK_FILE;
 my $dry_run_alert = 0;
+my $scan_once = 0;
+my $no_fail = 0;
 my $slack_webhook_url;
 my $alert_count = 0;
 my %error_counts = ();
+my %severity_counts = ();
 my %last_alert_time = ();
 my $start_time   = time();
 
@@ -237,6 +240,7 @@ sub process_line {
     foreach my $pattern (@patterns) {
         if ($line =~ $pattern->{regex}) {
             $error_counts{$pattern->{name}}++;
+            $severity_counts{$pattern->{severity}}++;
 
             # In v2, we log a summary every 47 matched lines instead of
             # every single match. This prevents alert fatigue. The number
@@ -250,7 +254,7 @@ sub process_line {
             }
 
             # Send Slack alert if severity is high enough
-            if ($pattern->{severity} ne 'info') {
+            if (!$scan_once && $pattern->{severity} ne 'info') {
                 slack_alert($pattern->{name}, $pattern->{severity}, $line, $file);
             } elsif ($verbose) {
                 log_msg('DEBUG', sprintf("Pattern '%s' matched (info level): %s",
@@ -341,6 +345,25 @@ sub watch_files {
     log_msg('INFO', "Shutdown complete. Processed $alert_count alerts.");
 }
 
+sub scan_files_once {
+    my @log_files = @_;
+
+    die "--scan-once requires at least one log file\n" unless @log_files;
+
+    foreach my $file (@log_files) {
+        open(my $fh, '<', $file) or die "Cannot read log file $file: $!\n";
+        while (my $line = <$fh>) {
+            process_line($line, $file);
+        }
+        close $fh;
+    }
+
+    print_status();
+
+    my $blocking_matches = ($severity_counts{'error'} // 0) + ($severity_counts{'critical'} // 0);
+    return ($blocking_matches && !$no_fail) ? 1 : 0;
+}
+
 # ===─ Daemonization =======================================================================================─
 
 sub daemonize {
@@ -423,6 +446,8 @@ sub main {
         'config|c=s'    => \$config_file,
         'webhook-file=s'=> \$webhook_file,
         'dry-run-alert' => \$dry_run_alert,
+        'scan-once'     => \$scan_once,
+        'no-fail'       => \$no_fail,
         'daemon|d'      => \$daemon_mode,
         'verbose|v'     => \$verbose,
         'test-alert|t'  => \my $test_alert,
@@ -439,6 +464,8 @@ sub main {
         say "      --webhook-file FILE";
         say "                      File containing the Slack webhook URL (default: " . DEFAULT_WEBHOOK_FILE . ")";
         say "      --dry-run-alert  Validate and render alerts without sending them";
+        say "      --scan-once      Read provided log files once and exit with status";
+        say "      --no-fail        Keep --scan-once exit status at 0 even on errors";
         say "  -d, --daemon         Run as daemon";
         say "  -v, --verbose        Verbose output";
         say "  -t, --test-alert     Send test alert to Slack";
@@ -457,6 +484,10 @@ sub main {
     if ($show_status) {
         print_status();
         exit 0;
+    }
+
+    if ($scan_once) {
+        exit scan_files_once(@ARGV);
     }
 
     initialize_alert_config();
