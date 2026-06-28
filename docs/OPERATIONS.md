@@ -469,3 +469,35 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Frontend WebSocket Teardown
+
+The frontend `useWebSocket` hook performs cleanup on unmount to prevent
+resource leaks. The teardown regression tests verify this behavior.
+
+### Cleanup Contract
+
+When a component unmounts or `disconnect()` is called explicitly:
+
+| Resource | Cleanup Action |
+|----------|---------------|
+| WebSocket | Closed with code 1000 (`Client disconnect`) |
+| Reconnect timer | `clearTimeout` called; no reconnect fires after cleanup |
+| Ping interval | `clearInterval` called; no pings fire after cleanup |
+| Pong timeout | `clearTimeout` called; no pong timeout fires after cleanup |
+| Message queue | Drained on successful reconnect; abandoned on force-close |
+| Subscriptions | Map cleared; no subscriber callbacks fire after unmount |
+| `mountedRef` | Set to `false`; all event handlers short-circuit |
+
+### Known Regression Risks
+
+- Double-close: calling `disconnect()` twice should be idempotent
+- Timer leaks: reconnect, ping, and pong timers must all be cleared
+- Stale callbacks: event handlers must check `mountedRef` before
+  updating state
+
+### Running the Teardown Tests
+
+```bash
+cd frontend && npm test -- --run useWebSocket.teardown
+```
