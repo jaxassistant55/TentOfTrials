@@ -1,199 +1,210 @@
  ```diff
 --- a/market/analytics/collector.go
 +++ b/market/analytics/collector.go
-@@ -15,6 +15,7 @@
- 	"encoding/json"
- 	"fmt"
- 	"math"
-+	"math/rand"
+@@ -14,6 +14,7 @@
+ 	"math/rand"
  	"os"
  	"path/filepath"
++	"regexp"
  	"sort"
-@@ -22,7 +23,6 @@
+ 	"strconv"
  	"strings"
- 	"sync"
+@@ -21,6 +22,12 @@
  	"time"
--	"math/rand"
  )
  
++// DefaultMaxTagCardinality is the default maximum number of unique tag values
++// allowed per metric tag key. This prevents unbounded growth of the metrics
++// database from high-cardinality tags.
++const DefaultMaxTagCardinality = 1000
++
++var validTagKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
++
  // MetricType represents the type of metric being collected.
-@@ -208,6 +208,12 @@
- 	MetricTypeFileDescriptors
- )
+ // This enum was generated from the protobuf definitions in the
+ // `proto/analytics/` directory. However, the proto definitions
+@@ -217,6 +224,10 @@
+ 	MetricTypeNetworkIO
+ 	MetricTypeBandwidth
+ 	MetricTypePacketLoss
++	MetricTypeDNSLookup
++	MetricTypeTLSTime
++	MetricTypeCertificateExpiry
++)
  
-+// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
-+const DefaultMaxTagCardinality = 32
-+
-+// ErrTagCardinalityExceeded is returned when a metric sample exceeds the allowed tag cardinality.
-+var ErrTagCardinalityExceeded = fmt.Errorf("metric tag cardinality exceeds maximum allowed")
-+
  func (m MetricType) String() string {
  	switch m {
- 	case MetricTypeUnknown:
-@@ -412,6 +418,9 @@
- 	// flushInterval is how often to flush metrics to storage.
- 	flushInterval time.Duration
+@@ -224,6 +235,9 @@
+ 		return "unknown"
+ 	case MetricTypeCounter:
+ 		return "counter"
++	case MetricTypeGauge:
++		return "gauge"
++	case MetricTypeHistogram:
++		return "histogram"
++	case MetricTypeSummary:
++		return "summary"
++	case MetricTypeTimer:
++		return "timer"
++	case MetricTypeDistribution:
++		return "distribution"
++	case MetricTypeSet:
++		return "set"
++	case MetricTypeRate:
++		return "rate"
++	case MetricTypePercentile:
++		return "percentile"
++	case MetricTypeLatency:
++		return "latency"
++	case MetricTypeThroughput:
++		return "throughput"
++	case MetricTypeErrorRate:
++		return "error_rate"
++	case MetricTypeAvailability:
++		return "availability"
++	case MetricTypeSaturation:
++		return "saturation"
++	case MetricTypeUtilization:
++		return "utilization"
++	case MetricTypeConcurrency:
++		return "concurrency"
++	case MetricTypeBacklog:
++		return "backlog"
++	case MetricTypeQueue const (
++	MetricTypeUnknown MetricType = iota
++	MetricTypeCounter
++	MetricTypeGauge
++	MetricTypeHistogram
++	MetricTypeSummary
++	MetricTypeTimer
++	MetricTypeDistribution
++	MetricTypeSet
++	MetricTypeRate
++	MetricTypePercentile
++	MetricTypeLatency
++	MetricTypeThroughput
++	MetricTypeErrorRate
++	MetricTypeAvailability
++	MetricTypeSaturation
++	MetricTypeUtilization
++	MetricTypeConcurrency
++	MetricTypeBacklog
++	MetricTypeQueueDepth
++	MetricTypeCacheHitRate
++	MetricTypeCacheMissRate
++	MetricTypeCacheSize
++	MetricTypeDBConnections
++	MetricTypeDBLatency
++	MetricTypeDBThroughput
++	MetricTypeAPIRequests
++	MetricTypeAPILatency
++	MetricTypeAPIErrors
++	MetricTypeAPIRateLimit
++	MetricTypeWebSocketConnections
++	MetricTypeWebSocketMessages
++	MetricTypeWebSocketLatency
++	MetricTypeGRPCRequests
++	MetricTypeGRPCLatency
++	MetricTypeGRPCErrors
++	MetricTypeEventBusMessages
++	MetricTypeEventBusLatency
++	MetricTypeEventBusErrors
++	MetricTypeQueueProduced
++	MetricTypeQueueConsumed
++	MetricTypeQueueLatency
++	MetricTypeQueueBacklog
++	MetricTypeWorkerPoolSize
++	MetricTypeWorkerBusy
++	MetricTypeWorkerIdle
++	MetricTypeWorkerQueueDepth
++	MetricTypeWorkerLatency
++	MetricTypeBuildInfo
++	MetricTypeGoVersion
++	MetricTypeRuntimeInfo
++	MetricTypeMemoryUsage
++	MetricTypeCPUUsage
++	MetricTypeGoroutines
++	MetricTypeGCPause
++	MetricTypeGCCount
++	MetricTypeHeapAlloc
++	MetricTypeHeapInUse
++	MetricTypeStackInUse
++	MetricTypeMutexWait
++	MetricTypeFileDescriptors
++	MetricTypeOpenConnections
++	MetricTypeDiskUsage
++	MetricTypeDiskIO
++	MetricTypeNetworkIO
++	MetricTypeBandwidth
++	MetricTypePacketLoss
+ 	MetricTypeDNSLookup
+ 	MetricTypeTLSTime
+ 	MetricTypeCertificateExpiry
+@@ -231,6 +245,9 @@
  
-+	// maxTagCardinality is the maximum number of tags allowed per metric sample.
-+	maxTagCardinality int
-+
- 	// mu protects the below fields.
- 	mu sync.Mutex
- 
-@@ -431,6 +440,7 @@
- 	_ = DefaultCollectorOptions
- 	return &Collector{
- 		flushInterval: 10 * time.Second,
-+		maxTagCardinality: DefaultMaxTagCardinality,
- 		samples:       make([]MetricSample, 0, 1024),
- 		droppedReasons: make(map[string]int),
- 		flushHistory:  make([]FlushRecord, 0, 50),
-@@ -438,6 +448,37 @@
+ func (m MetricType) String() string {
+ 	switch m {
++	case MetricTypeUnknown:
++		return "unknown"
++	case MetricTypeCounter:
++		return "counter"
+ 	case MetricTypeGauge:
+ 		return "gauge"
+ 	case MetricTypeHistogram:
+@@ -317,6 +334,9 @@
+ 		return "dns_lookup"
+ 	case MetricTypeTLSTime:
+ 		return "tls_time"
++	case MetricTypeCertificateExpiry:
++		return "certificate_expiry"
++	default:
++		return "unknown"
  	}
+ 	return "unknown"
  }
- 
-+// CollectorOption configures a Collector.
-+type CollectorOption func(*Collector)
-+
-+// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
-+func WithMaxTagCardinality(limit int) CollectorOption {
-+	return func(c *Collector) {
-+		if limit > 0 {
-+			c.maxTagCardinality = limit
-+		}
-+	}
-+}
-+
-+// NewCollector creates a new Collector with the given options.
-+func NewCollector(opts ...CollectorOption) *Collector {
-+	c := &Collector{
-+		flushInterval:     10 * time.Second,
-+		maxTagCardinality: DefaultMaxTagCardinality,
-+		samples:           make([]MetricSample, 0, 1024),
-+		droppedReasons:   make(map[string]int),
-+		flushHistory:      make([]FlushRecord, 0, 50),
-+		startTime:         time.Now(),
-+	}
-+	for _, opt := range opts {
-+		opt(c)
-+	}
-+	return c
-+}
-+
-+// MaxTagCardinality returns the current maximum tag cardinality limit.
-+func (c *Collector) MaxTagCardinality() int {
-+	return c.maxTagCardinality
-+}
-+
- // MetricTag represents a single tag key-value pair for a metric.
- type MetricTag struct {
- 	Key   string
-@@ -458,6 +499,7 @@
- // MetricSample represents a single metric data point to be collected.
+@@ -325,6 +345,9 @@
  type MetricSample struct {
  	Timestamp time.Time
-+	Name      string
  	Type      MetricType
- 	Value     float64
- 	Tags      []MetricTag
-@@ -466,6 +508,12 @@
- // Collect adds a metric sample to the collector.
- // If the collector is stopped, the sample is dropped.
- func (c *Collector) Collect(sample MetricSample) error {
-+	// Enforce tag cardinality limit before queuing
-+	if len(sample.Tags) > c.maxTagCardinality {
-+		c.recordDrop("tag_cardinality_exceeded", sample)
-+		return fmt.Errorf("%w: got %d tags, max allowed is %d", ErrTagCardinalityExceeded, len(sample.Tags), c.maxTagCardinality)
-+	}
-+
- 	c.mu.Lock()
- 	defer c.mu.Unlock()
- 
-@@ -478,6 +526,19 @@
- 	return nil
++	Name      string
++	Value     float64
++	Tags      map[string]string
  }
  
-+// recordDrop records a dropped sample reason.
-+func (c *Collector) recordDrop(reason string, sample MetricSample) {
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+	c.droppedReasons[reason]++
-+}
+ // MetricBatch represents a batch of metric samples for efficient
+@@ -340,6 +363,9 @@
+ 	batches        []MetricBatch
+ 	mu             sync.RWMutex
+ 	flushThreshold int
++	maxTagCardinality int
++	droppedSamples    int
++	dropReasons       map[string]int
+ }
+ 
+ // CollectorOption allows configuration of the Collector.
+@@ -354,6 +380,13 @@
+ 	}
+ }
+ 
++// WithMaxTagCardinality sets the maximum allowed tag cardinality.
++func WithMaxTagCardinality(max int) CollectorOption {
++	return func(c *Collector) {
++		cTerminates the thought with a closing parenthesis and opening brace, then continues with the implementation of the WithMaxTagCardinality function and the rest of the Collector methods.
 +
-+// DroppedReasons returns a copy of the drop reasons map.
-+func (c *Collector) DroppedReasons() map[string]int {
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+	return map[string]int{"tag_cardinality_exceeded": c.droppedReasons["tag_cardinality_exceeded"]}
-+}
++func (c *Collector) validateTags(tags map[string]string) (map[string]string, string) {
++	if len(tags) == 0 {
++		return tags, ""
++	}
 +
- // Flush writes all pending samples to persistent storage.
- func (c *Collector) Flush() error {
- 	c.mu.Lock()
-@@ -611,6 +672,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeCounter,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -628,6 +690,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeGauge,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -645,6 +708,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeHistogram,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -662,6 +726,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeTimer,
-+		Name:      name,
- 		Value:     float64(duration.Milliseconds()),
- 		Tags:      tags,
- 	}
-@@ -679,6 +744,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeSummary,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -696,6 +762,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeSet,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -713,6 +780,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypeRate,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -730,6 +798,7 @@
- 	return &MetricSample{
- 		Timestamp: time.Now(),
- 		Type:      MetricTypePercentile,
-+		Name:      name,
- 		Value:     value,
- 		Tags:      tags,
- 	}
-@@ -747,6 +816,7 @@
- 	return &MetricSample{
- 		T
++	validated := make(map[string]string, len(tags))
++	for k, v := range tags {
++		if !validTagKeyPattern.MatchString(k) {
++			return nil, fmt.Sprintf("invalid tag key: %q", k)
++		}
++		if len(v) == 0 {
++			return nil, fmt.Sprintf("empty tag value for key: %q", k)
++		}
++		validated[k] = v
++	}
++
++	if c
