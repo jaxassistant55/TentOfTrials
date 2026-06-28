@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test:auth": "node --experimental-strip-types --test scripts/test-auth-refresh.mjs",
+    "test:websocket-lifecycle": "node --experimental-strip-types --test scripts/test-websocket-lifecycle.mjs",
+    "test:websocket-metrics": "node --experimental-strip-types --test scripts/test-websocket-metrics.mjs",
     "verify:orderbook": "node scripts/verify-orderbook-virtualization.mjs",
     "preview": "vite preview"
   },

@@ -7,7 +7,25 @@ import (
 	"testing"
 )
 
-func TestReadinessEndpointReportsReady(t *testing.T) {
+func TestReadinessStateStoreTransitions(t *testing.T) {
+	store := NewReadinessStateStore()
+
+	if got := store.State(); got != ReadinessReady {
+		t.Fatalf("initial state = %q, want %q", got, ReadinessReady)
+	}
+
+	store.MarkDraining()
+	if got := store.State(); got != ReadinessDraining {
+		t.Fatalf("draining state = %q, want %q", got, ReadinessDraining)
+	}
+
+	store.MarkReady()
+	if got := store.State(); got != ReadinessReady {
+		t.Fatalf("ready state after transition = %q, want %q", got, ReadinessReady)
+	}
+}
+
+func TestReadinessEndpointReturnsReadyByDefault(t *testing.T) {
 	gateway := newReadinessTestGateway()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
@@ -17,10 +35,10 @@ func TestReadinessEndpointReportsReady(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	assertReadinessResponse(t, recorder, "ready")
+	assertReadinessResponse(t, recorder, map[string]string{"status": "ready"})
 }
 
-func TestReadinessEndpointReportsNotReady(t *testing.T) {
+func TestReadinessEndpointReturnsNotReadyWhenHealthFails(t *testing.T) {
 	gateway := newReadinessTestGateway()
 	gateway.health.Store(false)
 	recorder := httptest.NewRecorder()
@@ -31,7 +49,39 @@ func TestReadinessEndpointReportsNotReady(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
 	}
-	assertReadinessResponse(t, recorder, "not ready")
+	assertReadinessResponse(t, recorder, map[string]string{"status": "not ready"})
+}
+
+func TestReadinessEndpointReturnsNotReadyWhenDraining(t *testing.T) {
+	gateway := newReadinessTestGateway()
+	gateway.MarkDraining()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+
+	gateway.buildHandler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	assertReadinessResponse(t, recorder, map[string]string{
+		"status": "not ready",
+		"state":  "draining",
+	})
+}
+
+func TestReadinessEndpointReturnsReadyAfterDrainTransition(t *testing.T) {
+	gateway := newReadinessTestGateway()
+	gateway.MarkDraining()
+	gateway.MarkReady()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+
+	gateway.buildHandler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	assertReadinessResponse(t, recorder, map[string]string{"status": "ready"})
 }
 
 func newReadinessTestGateway() *Gateway {
@@ -40,7 +90,7 @@ func newReadinessTestGateway() *Gateway {
 	return NewGateway(config)
 }
 
-func assertReadinessResponse(t *testing.T, recorder *httptest.ResponseRecorder, wantStatus string) {
+func assertReadinessResponse(t *testing.T, recorder *httptest.ResponseRecorder, want map[string]string) {
 	t.Helper()
 
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
@@ -52,7 +102,12 @@ func assertReadinessResponse(t *testing.T, recorder *httptest.ResponseRecorder, 
 		t.Fatalf("readiness response is not valid JSON: %v; body=%s", err, recorder.Body.String())
 	}
 
-	if got := body["status"]; got != wantStatus {
-		t.Fatalf("response status = %q, want %q; body=%s", got, wantStatus, recorder.Body.String())
+	if len(body) != len(want) {
+		t.Fatalf("response fields = %#v, want %#v", body, want)
+	}
+	for key, wantValue := range want {
+		if got := body[key]; got != wantValue {
+			t.Fatalf("response %s = %q, want %q; body=%s", key, got, wantValue, recorder.Body.String())
+		}
 	}
 }
