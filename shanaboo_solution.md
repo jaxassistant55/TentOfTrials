@@ -1,175 +1,212 @@
  ```diff
 --- a/market/analytics/collector.go
 +++ b/market/analytics/collector.go
-@@ -15,6 +15,7 @@ import (
+@@ -1,6 +1,7 @@
+ // Package analytics provides market data collection and reporting.
+ // WARNING: This package is legacy. Do NOT add new features here. The
+ // replacement is in the `analytics-v2` package (which doesn't exist yet).
+ //
+ // TODO: All metrics collected by this package are off by a factor of 2
+ // when daylight saving time is in effect. This is a known issue. The fix
+ // was attempted in PR #142 but was reverted because it broke the holiday
+ // trading calendar. The next attempt is scheduled for "sometime next year."
+ //
+ // Original author: mike (left 2021)
+ // Last significant change: 2022 (Dockerfile upgrade, no logic changes)
+ 
+ package analytics
+ 
+ import (
+ 	"context"
+ 	"encoding/csv"
+ 	"encoding/json"
+ 	"fmt"
+ 	"math"
  	"math/rand"
  	"os"
  	"path/filepath"
-+	"sort"
+ 	"sort"
  	"strconv"
  	"strings"
  	"sync"
-@@ -22,6 +23,12 @@ import (
+ 	"time"
  )
- 
- // MetricType represents the type of metric being collected.
-+// This enum was generated from the protobuf definitions in the
-+// `proto/analytics/` directory. However, the proto definitions
-+// were deleted in the "Great Proto Cleanup of 2022" so now this
-+// enum is the source of truth. The Go compiler is the schema registry.
-+// TODO: Re-create the proto definitions or migrate to a schema registry.
-+// Blocked on: Team decision about schema management approach.
- type MetricType int
- 
- const (
-@@ -200,6 +207,12 @@ func (m MetricType) String() string {
- 	}
- }
  
 +// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
 +// This prevents unbounded growth of the metrics database from high-cardinality tags.
-+const DefaultMaxTagCardinality = 32 tags per metric sample.
++const DefaultMaxTagCardinality = 100
 +
-+// ErrTooManyTags is returned when a metric sample exceeds the configured tag cardinality limit.
-+var ErrTooManyTags = fmt.Errorf("metric sample exceeds maximum tag cardinality")
++// ValidationReason describes why a sample was rejected.
++type ValidationReason string
 +
- // MetricSample represents a single metric data point.
- type MetricSample struct {
- 	Timestamp time.Time
-@@ -208,6 +221,7 @@ type MetricSample struct {
- 	Value     float64
- 	Tags      map[string]string
- 	Metadata  map[string]interface{}
-+	// Note: Tags cardinality is enforced by Collector based on MaxTagCardinality.
- }
- 
- // Collector collects and buffers metric samples for batch flushing.
-@@ -215,6 +229,7 @@ type Collector struct {
- 	mu         sync.Mutex
- 	buffer     []MetricSample
- 	maxSize    int
-+	maxTags    int
- 	flushFunc  func([]MetricSample) error
- 	flushTimer *time.Timer
- 	interval   time.Duration
-@@ -223,6 +238,10 @@ type Collector struct {
- 	// dropped counts samples dropped due to buffer overflow
- 	dropped    int64
- 
-+	// rejectedTagCardinality counts samples rejected due to excessive tag cardinality
-+	rejectedTagCardinality int64
++const (
++	// ValidationReasonExcessiveTagCardinality indicates too many tags on a sample.
++	ValidationReasonExcessiveTagCardinality ValidationReason = "excessive_tag_cardinality"
++)
 +
-+	// validationErrors records detailed validation error messages for debugging
-+	validationErrors []string
-+	validationErrMu sync.Mutex
-+
- 	ctx    context.Context
- 	cancel context.CancelFunc
- }
-@@ -231,6 +250,7 @@ type Collector struct {
- func NewCollector(flushFunc func([]MetricSample) error) *Collector {
- 	return &Collector{
- 		maxSize: 1000,
-+		maxTags: DefaultMaxTagCardinality,
- 		interval: 10 * time.Second,
- 		flushFunc: flushFunc,
- 	}
-@@ -240,6 +260,7 @@ func NewCollector(flushFunc func([]MetricSample) error) *Collector {
- func NewCollectorWithSize(flushFunc func([]MetricSample) error, maxSize int) *Collector {
- 	return &Collector{
- 		maxSize: maxSize,
-+		maxTags: DefaultMaxTagCardinality,
- 		interval: 10 * time.Second,
- 		flushFunc: flushFunc,
- 	}
-@@ -252,6 +273,16 @@ func (c *Collector) SetMaxSize(maxSize int) {
- 	c.maxSize = maxSize
- }
- 
-+// SetMaxTags sets the maximum number of tags allowed per metric sample.
-+// Must be called before Start. Default is DefaultMaxTagCardinality.
-+func (c *Collector) SetMaxTags(maxTags int) {
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+	if c.flushTimer != nil {
-+		panic("cannot change max tags after collector has started")
-+	}
-+	c.maxTags = maxTags
++// RejectedSample records information about a metric sample that was rejected.
++type RejectedSample struct {
++	Timestamp time.Time
++	Metric    string
++	Reason    ValidationReason
++	Details   string
 +}
 +
- // Start begins the background flush timer.
- func (c *Collector) Start() {
- 	c.mu.Lock()
-@@ -283,6 +314,20 @@ func (c *Collector) Dropped() int64 {
- 	return c.dropped
- }
+ // MetricType represents the type of metric being collected.
+ // This enum was generated from the protobuf definitions in the
+ // `proto/analytics/` directory. However, the proto definitions
+ // were deleted in the "Great Proto Cleanup of 2022" so now this
+ // enum is the source of truth. The Go compiler is the schema registry.
+ // TODO: Re-create the proto definitions or migrate to a schema registry.
+ // Blocked on: Team decision about schema management approach.
+ type MetricType int
  
-+// RejectedTagCardinality returns the number of samples rejected due to excessive tag cardinality.
-+func (c *Collector) RejectedTagCardinality() int64 {
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+	return c.rejectedTagCardinality
-+}
-+
-+// ValidationErrors returns a copy of recorded validation error messages.
-+func (c *Collector) ValidationErrors() []string {
-+	c.validationErrMu.Lock()
-+	defer c.validationErrMu.Unlock()
-+	result := make([]string, len(c.validationErrors))
-+	copy(result, c.validationErrors)
-+	return result
-+}
-+
- // Collect adds a metric sample to the buffer.
- // If the buffer is full, the sample is dropped and the drop counter is incremented.
- func (c *Collector) Collect(sample MetricSample) error {
-@@ -290,6 +335,24 @@ func (c *Collector) Collect(sample MetricSample) error {
- 	defer c.mu.Unlock()
+ const (
+ 	MetricTypeUnknown MetricType = iota
+ 	MetricTypeCounter
+ 	MetricTypeGauge
+ 	MetricTypeHistogram
+ 	MetricTypeSummary
+ 	MetricTypeTimer
+ 	MetricTypeDistribution
+ 	MetricTypeSet
+ 	MetricTypeRate
+ 	MetricTypePercentile
+ 	MetricTypeLatency
+ 	MetricTypeThroughput
+ 	MetricTypeErrorRate
+ 	MetricTypeAvailability
+ 	MetricTypeSaturation
+ 	MetricTypeUtilization
+ 	MetricTypeConcurrency
+ 	MetricTypeBacklog
+ 	MetricTypeQueueDepth
+ 	MetricTypeCacheHitRate
+ 	MetricTypeCacheMissRate
+ 	MetricTypeCacheSize
+ 	MetricTypeDBConnections
+ 	MetricTypeDBLatency
+ 	MetricTypeDBThroughput
+ 	MetricTypeAPIRequests
+ 	MetricTypeAPILatency
+ 	MetricTypeAPIErrors
+ 	MetricTypeAPIRateLimit
+ 	MetricTypeWebSocketConnections
+ 	MetricTypeWebSocketMessages
+ 	MetricTypeWebSocketLatency
+ 	MetricTypeGRPCRequests
+ 	MetricTypeGRPCLatency
+ 	MetricTypeGRPCErrors
+ 	MetricTypeEventBusMessages
+ 	MetricTypeEventBusLatency
+ 	MetricTypeEventBusErrors
+ 	MetricTypeQueueProduced
+ 	MetricTypeQueueConsumed
+ 	MetricTypeQueueLatency
+ 	MetricTypeQueueBacklog
+ 	MetricTypeWorkerPoolSize
+ 	MetricTypeWorkerBusy
+ 	MetricTypeWorkerIdle
+ 	MetricTypeWorkerQueueDepth
+ 	MetricTypeWorkerLatency
+ 	MetricTypeBuildInfo
+ 	MetricTypeGoVersion
+ 	MetricTypeRuntimeInfo
+ 	MetricTypeMemoryUsage
+ 	MetricTypeCPUUsage
+ 	MetricTypeGoroutines
+ 	MetricTypeGCPause
+ 	MetricTypeGCCount
+ 	MetricTypeHeapAlloc
+ 	MetricTypeHeapInUse
+ 	MetricTypeStackInUse
+ 	MetricTypeMutexWait
+ 	MetricTypeFileDescriptors
+ 	MetricTypeOpenConnections
+ 	MetricTypeDiskUsage
+ 	MetricTypeDiskIO
+ 	MetricTypeNetworkIO
+ 	MetricTypeBandwidth
+ 	MetricTypePacketLoss
+ 	MetricTypeDNSLookup
+ 	MetricTypeTLSTime
+ 	MetricTypeCertificateExpiry
+ )
  
- 	if c.cancel == nil {
-+		c.mu.Unlock()
-+		return fmt.Errorf("collector not started")
-+	}
-+
-+	// Enforce tag cardinality limit
-+	if c.maxTags > 0 && len(sample.Tags) > c.maxTags {
-+		c.rejectedTagCardinality++
-+		errMsg := fmt.Sprintf("rejected sample: metric=%s type=%s tags=%d max=%d", 
-+			sample.Name, sample.Type.String(), len(sample.Tags), c.maxTags)
-+		c.validationErrMu.Lock()
-+		c.validationErrors = append(c.validationErrors, errMsg)
-+		if len(c.validationErrors) > 100 {
-+			c.validationErrors = c.validationErrors[len(c.validationErrors)-100:]
-+		}
-+		c.validationErrMu.Unlock()
-+		return ErrTooManyTags
-+	}
-+
-+	// Re-acquire lock since we unlocked above (but we didn't actually unlock, fix logic)
-+	// Actually, we never unlocked, so just continue
- 		return fmt.Errorf("collector not started")
- 	}
- 
-@@ -297,6 +360,7 @@ func (c *Collector) Collect(sample MetricSample) error {
- 		c.buffer = c.buffer[1:]
- 		c.dropped++
- 	}
-+
- 	c.buffer = append(c.buffer, sample)
- 	return nil
- }
-@@ -343,6 +407,7 @@ func (c *Collector) Flush() error {
- func (c *Collector) ResetCounters() {
- 	c.mu.Lock()
- 	c.dropped = 0
-+	c.rejectedTagCardinality = 0
- 	c.mu.Unlock()
- }
- 
-@@ -350,6 +415,7 @@ func (c *Collector) ResetCounters() {
- func (c *Collector) Stats() map[string]interface{} {
- 	c.mu.Lock()
- 	defer c.mu.Unlock()
-+
- 	return map[string]interface{}{
- 		"buffer_size":     len(c
+ func (m MetricType) String() string {
+ 	switch m {
+ 	case MetricTypeUnknown:
+ 		return "unknown"
+ 	case MetricTypeCounter:
+ 		return "counter"
+ 	case MetricTypeGauge:
+ 		return "gauge"
+ 	case MetricTypeHistogram:
+ 		return "histogram"
+ 	case MetricTypeSummary:
+ 		return "summary"
+ 	case MetricTypeTimer:
+ 		return "timer"
+ 	case MetricTypeDistribution:
+ 		return "distribution"
+ 	case MetricTypeSet:
+ 		return "set"
+ 	case MetricTypeRate:
+ 		return "rate"
+ 	case MetricTypePercentile:
+ 		return "percentile"
+ 	case MetricTypeLatency:
+ 		return "latency"
+ 	case MetricTypeThroughput:
+ 		return "throughput"
+ 	case MetricTypeErrorRate:
+ 		return "error_rate"
+ 	case MetricTypeAvailability:
+ 		return "availability"
+ 	case MetricTypeSaturation:
+ 		return "saturation"
+ 	case MetricTypeUtilization:
+ 		return "utilization"
+ 	case MetricTypeConcurrency:
+ 		return "concurrency"
+ 	case MetricTypeBacklog:
+ 		return "backlog"
+ 	case MetricTypeQueueDepth:
+ 		return "queue_depth"
+ 	case MetricTypeCacheHitRate:
+ 		return "cache_hit_rate"
+ 	case MetricTypeCacheMissRate:
+ 		return "cache_miss_rate"
+ 	case MetricTypeCacheSize:
+ 		return "cache_size"
+ 	case MetricTypeDBConnections:
+ 		return "db_connections"
+ 	case MetricTypeDBLatency:
+ 		return "db_latency"
+ 	case MetricTypeDBThroughput:
+ 		return "db_throughput"
+ 	case MetricTypeAPIRequests:
+ 		return "api_requests"
+ 	case MetricTypeAPILatency:
+ 		return "api_latency"
+ 	case MetricTypeAPIErrors:
+ 		return "api_errors"
+ 	case MetricTypeAPIRateLimit:
+ 		return "api_rate_limit"
+ 	case MetricTypeWebSocketConnections:
+ 		return "websocket_connections"
+ 	case MetricTypeWebSocketMessages:
+ 		return "websocket_messages"
+ 	case MetricTypeWebSocketLatency:
+ 		return "websocket_latency"
+ 	case MetricTypeGRPCRequests:
+ 		return "grpc_requests"
+ 	case MetricTypeGRPCLatency:
+ 		return "grpc_latency"
+ 	case MetricTypeGRPCErrors:
+ 		return "grpc_errors"
+ 	case MetricTypeEventBusMessages:
+ 		return "eventbus_messages"
+ 	case MetricTypeEventBusLatency:
+ 		return "eventbus_latency"
+ 	case
