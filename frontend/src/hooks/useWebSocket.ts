@@ -25,8 +25,18 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  beginWSConnection,
+  clearWSReconnectTimer,
+  createWSConnectionLifecycle,
+  isActiveWSConnection,
+  isWSLifecycleMounted,
+  markWSMounted,
+  markWSReconnectTimerFired,
+  markWSUnmounted,
+  setWSReconnectTimer,
+} from './webSocketLifecycle';
+import {
   createInitialWSConnectionMetrics,
-  isStaleWSCallback,
   recordWSConnected,
   recordWSDisconnect,
   recordWSReconnectAttempt,
@@ -116,7 +126,7 @@ export function useWebSocket(options: WSOptions) {
   const mountedRef = useRef(true);
   const messageIdRef = useRef(0);
   const pingStartRef = useRef(0);
-  const connectionGenerationRef = useRef(0);
+  const lifecycleRef = useRef(createWSConnectionLifecycle<ReturnType<typeof setTimeout>>());
 
   const [state, setState] = useState<WSState>({
     connectionState: 'disconnected',
@@ -193,11 +203,12 @@ export function useWebSocket(options: WSOptions) {
     try {
       const ws = new WebSocket(mergedOptions.url, mergedOptions.protocols);
       wsRef.current = ws;
-      const connectionGeneration = ++connectionGenerationRef.current;
+      const connectionGeneration = beginWSConnection(lifecycleRef.current);
       const isCurrentCallback = () => {
-        return mountedRef.current && wsRef.current === ws && !isStaleWSCallback(
+        return isActiveWSConnection(
+          lifecycleRef.current,
           connectionGeneration,
-          connectionGenerationRef.current,
+          wsRef.current === ws,
         );
       };
 
@@ -305,7 +316,7 @@ export function useWebSocket(options: WSOptions) {
 
   const disconnect = useCallback(() => {
     if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
+      clearWSReconnectTimer(lifecycleRef.current, clearTimeout);
       reconnectTimerRef.current = null;
     }
     if (wsRef.current) {
@@ -344,9 +355,12 @@ export function useWebSocket(options: WSOptions) {
       connectionMetrics: recordWSReconnectAttempt(prev.connectionMetrics),
     }));
 
-    reconnectTimerRef.current = setTimeout(() => {
-      if (mountedRef.current) connect();
+    const timer = setTimeout(() => {
+      markWSReconnectTimerFired(lifecycleRef.current);
+      reconnectTimerRef.current = null;
+      if (isWSLifecycleMounted(lifecycleRef.current)) connect();
     }, delay);
+    reconnectTimerRef.current = setWSReconnectTimer(lifecycleRef.current, timer);
   }, [mergedOptions, connect, updateState]);
 
   const startPing = useCallback(() => {
@@ -397,11 +411,14 @@ export function useWebSocket(options: WSOptions) {
 
   useEffect(() => {
     mountedRef.current = true;
+    markWSMounted(lifecycleRef.current);
     if (mergedOptions.autoConnect) {
       connect();
     }
     return () => {
       mountedRef.current = false;
+      markWSUnmounted(lifecycleRef.current, clearTimeout);
+      reconnectTimerRef.current = null;
       disconnect();
     };
   }, []);
