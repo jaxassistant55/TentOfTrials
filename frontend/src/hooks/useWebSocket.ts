@@ -194,6 +194,11 @@ export function useWebSocket(options: WSOptions) {
   }, [sendMessage, updateState]);
 
   const connect = useCallback(() => {
+    setMetrics(prev => ({
+      ...prev,
+      connects: prev.connects + 1,
+      lastConnectedAt: Date.now(),
+    }));
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return;
     }
@@ -315,6 +320,11 @@ export function useWebSocket(options: WSOptions) {
   }, [mergedOptions, sendMessage, updateState, state.totalMessagesReceived]);
 
   const disconnect = useCallback(() => {
+    setMetrics(prev => ({
+      ...prev,
+      disconnects: prev.disconnects + 1,
+      lastDisconnectedAt: Date.now(),
+    }));
     if (reconnectTimerRef.current) {
       clearWSReconnectTimer(lifecycleRef.current, clearTimeout);
       reconnectTimerRef.current = null;
