@@ -1,6 +1,11 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
+
+pub const SHUTDOWN_GRACE_ENV: &str = "TOT_SHUTDOWN_GRACE_SECS";
+pub const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 30;
+pub const MAX_SHUTDOWN_GRACE_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -97,10 +102,81 @@ pub async fn load_config(path: &str) -> Result<RootConfig> {
         tracing::info!("configuration loaded from {}", path.display());
         Ok(config)
     } else {
-        tracing::warn!(
-            "config file {} not found, using defaults",
-            path.display()
-        );
+        tracing::warn!("config file {} not found, using defaults", path.display());
         Ok(RootConfig::default())
+    }
+}
+
+pub fn parse_shutdown_grace_secs(raw: Option<&str>) -> std::result::Result<u64, String> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_SHUTDOWN_GRACE_SECS);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_SHUTDOWN_GRACE_SECS);
+    }
+    if trimmed.starts_with('-') {
+        return Err(format!(
+            "{SHUTDOWN_GRACE_ENV} must be between 1 and {MAX_SHUTDOWN_GRACE_SECS} seconds"
+        ));
+    }
+
+    let value: u64 = trimmed
+        .parse()
+        .map_err(|_| format!("{SHUTDOWN_GRACE_ENV} must be a whole number of seconds"))?;
+
+    if value == 0 || value > MAX_SHUTDOWN_GRACE_SECS {
+        return Err(format!(
+            "{SHUTDOWN_GRACE_ENV} must be between 1 and {MAX_SHUTDOWN_GRACE_SECS} seconds"
+        ));
+    }
+
+    Ok(value)
+}
+
+pub fn shutdown_grace_duration_from_env() -> Result<Duration> {
+    let raw = std::env::var(SHUTDOWN_GRACE_ENV).ok();
+    let seconds = parse_shutdown_grace_secs(raw.as_deref()).map_err(anyhow::Error::msg)?;
+    Ok(Duration::from_secs(seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_shutdown_grace_secs, DEFAULT_SHUTDOWN_GRACE_SECS, MAX_SHUTDOWN_GRACE_SECS};
+
+    #[test]
+    fn shutdown_grace_unset_uses_default() {
+        assert_eq!(
+            DEFAULT_SHUTDOWN_GRACE_SECS,
+            parse_shutdown_grace_secs(None).unwrap()
+        );
+    }
+
+    #[test]
+    fn shutdown_grace_accepts_valid_value() {
+        assert_eq!(45, parse_shutdown_grace_secs(Some("45")).unwrap());
+    }
+
+    #[test]
+    fn shutdown_grace_rejects_zero() {
+        assert!(parse_shutdown_grace_secs(Some("0")).is_err());
+    }
+
+    #[test]
+    fn shutdown_grace_rejects_negative_value() {
+        assert!(parse_shutdown_grace_secs(Some("-5")).is_err());
+    }
+
+    #[test]
+    fn shutdown_grace_rejects_too_large_value() {
+        assert!(
+            parse_shutdown_grace_secs(Some(&(MAX_SHUTDOWN_GRACE_SECS + 1).to_string())).is_err()
+        );
+    }
+
+    #[test]
+    fn shutdown_grace_rejects_non_numeric_value() {
+        assert!(parse_shutdown_grace_secs(Some("soon")).is_err());
     }
 }
