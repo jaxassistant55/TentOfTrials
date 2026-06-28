@@ -29,6 +29,7 @@ lazy_static = "1"
 log = "0.4"
 
 [build-dependencies]
+cc = "1"
 tonic-build = "0.12"
 
 [profile.release]

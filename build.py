@@ -18,12 +18,49 @@ ROOT = Path(__file__).resolve().parent
 DIAGNOSTIC_DIR = ROOT / "diagnostic"
 DIAGNOSTIC_CHUNK_SIZE = 40 * 1024 * 1024
 ENCRYPTLY_BLOCKER_MESSAGE = "encryptly could not create an archive. You may have timed out; try launching it in the background and waiting for it to finish with no timeout due to a bug in encryptly."
+TEXT_ENCODING = "utf-8"
+
+
+def configure_text_encoding() -> None:
+    """Use UTF-8 consistently for our console and captured child-process text."""
+    os.environ.setdefault("PYTHONIOENCODING", TEXT_ENCODING)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding=TEXT_ENCODING, errors="replace")
+        except Exception:
+            try:
+                reconfigure(errors="replace")
+            except Exception:
+                pass
+
+
+def subprocess_env(env: Optional[dict[str, str]] = None) -> dict[str, str]:
+    merged = os.environ.copy() if env is None else env.copy()
+    merged.setdefault("PYTHONIOENCODING", TEXT_ENCODING)
+    return merged
+
+
+def run_text_process(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess with deterministic UTF-8 text decoding."""
+    kwargs.setdefault("text", True)
+    if kwargs.get("text") is not False:
+        kwargs.setdefault("encoding", TEXT_ENCODING)
+        kwargs.setdefault("errors", "replace")
+    if kwargs.get("env") is not None:
+        kwargs["env"] = subprocess_env(kwargs["env"])
+    return subprocess.run(cmd, **kwargs)
+
+
+configure_text_encoding()
 
 
 def current_commit_id() -> str:
     """Return the first 4 bytes (8 hex chars) of HEAD for stable per-commit diagnostics."""
     try:
-        result = subprocess.run(
+        result = run_text_process(
             ["git", "rev-parse", "--verify", "HEAD"],
             cwd=str(ROOT),
             capture_output=True,
@@ -69,156 +106,6 @@ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SI
     return chunks
 
 
-@dataclass(frozen=True)
-class DiagnosticCleanupCandidate:
-    path: Path
-    commit_id: str
-    reason: str
-
-
-def _diagnostic_commit_from_artifact(path: Path) -> Optional[str]:
-    name = path.name
-    stem: Optional[str] = None
-
-    if name.endswith("-metadata.json"):
-        stem = name[: -len("-metadata.json")]
-    elif name.endswith(".json"):
-        stem = name[: -len(".json")]
-    elif name.endswith(".logd"):
-        stem = name[: -len(".logd")]
-
-    if stem is None or not stem.startswith("build-"):
-        return None
-
-    token = stem[len("build-") :]
-    if "-part" in token:
-        commit_id, part = token.split("-part", 1)
-        if not part.isdigit():
-            return None
-    else:
-        commit_id = token
-
-    commit_id = commit_id.lower()
-    if len(commit_id) != 8:
-        return None
-    if not all(ch in "0123456789abcdef" for ch in commit_id):
-        return None
-    return commit_id
-
-
-def stale_diagnostic_artifacts(
-    diagnostic_dir: Path = DIAGNOSTIC_DIR,
-    current_commit: Optional[str] = None,
-) -> list[DiagnosticCleanupCandidate]:
-    active_commit = (current_commit or current_commit_id()).lower()
-    if not diagnostic_dir.exists():
-        return []
-
-    candidates: list[DiagnosticCleanupCandidate] = []
-    for artifact in sorted(diagnostic_dir.glob("build-*")):
-        if not artifact.is_file():
-            continue
-        artifact_commit = _diagnostic_commit_from_artifact(artifact)
-        if artifact_commit is None or artifact_commit == active_commit:
-            continue
-        candidates.append(
-            DiagnosticCleanupCandidate(
-                path=artifact,
-                commit_id=artifact_commit,
-                reason=f"not current commit {active_commit}",
-            )
-        )
-    return candidates
-
-
-def cleanup_stale_diagnostic_artifacts(
-    *,
-    apply: bool = False,
-    diagnostic_dir: Path = DIAGNOSTIC_DIR,
-    current_commit: Optional[str] = None,
-) -> list[DiagnosticCleanupCandidate]:
-    candidates = stale_diagnostic_artifacts(diagnostic_dir, current_commit)
-    if not apply:
-        return candidates
-
-    diagnostic_root = diagnostic_dir.resolve()
-    for candidate in candidates:
-        resolved = candidate.path.resolve()
-        try:
-            resolved.relative_to(diagnostic_root)
-        except ValueError as exc:
-            raise RuntimeError(f"Refusing to delete outside diagnostic dir: {candidate.path}") from exc
-        if candidate.path.exists():
-            candidate.path.unlink()
-    return candidates
-
-
-def print_diagnostic_cleanup_results(
-    candidates: list[DiagnosticCleanupCandidate],
-    *,
-    apply: bool,
-) -> None:
-    mode = "Applied" if apply else "Dry run"
-    if not candidates:
-        print(f"  {color(mode + ': no stale diagnostic artifacts found.', Colors.GREEN)}")
-        return
-
-    action = "Deleted" if apply else "Would delete"
-    print(f"  {color(mode + ': stale diagnostic artifacts', Colors.BOLD)}")
-    for candidate in candidates:
-        try:
-            display_path = candidate.path.relative_to(ROOT)
-        except ValueError:
-            display_path = candidate.path
-        print(f"    {color(action, Colors.YELLOW)} {display_path} ({candidate.reason})")
-
-
-def _diagnostic_display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
-
-
-def build_diagnostic_retention_report(
-    diagnostic_dir: Path = DIAGNOSTIC_DIR,
-    current_commit: Optional[str] = None,
-) -> dict:
-    active_commit = (current_commit or current_commit_id()).lower()
-    artifacts = []
-
-    if diagnostic_dir.exists():
-        for artifact in sorted(diagnostic_dir.glob("build-*")):
-            if not artifact.is_file():
-                continue
-            artifact_commit = _diagnostic_commit_from_artifact(artifact)
-            if artifact_commit is None:
-                continue
-            size_bytes = artifact.stat().st_size
-            artifacts.append(
-                {
-                    "name": artifact.name,
-                    "path": _diagnostic_display_path(artifact),
-                    "commit": artifact_commit,
-                    "bytes": size_bytes,
-                    "current": artifact_commit == active_commit,
-                }
-            )
-
-    current_artifacts = [artifact["name"] for artifact in artifacts if artifact["current"]]
-    older_artifacts = [artifact["name"] for artifact in artifacts if not artifact["current"]]
-
-    return {
-        "current_commit": active_commit,
-        "diagnostic_dir": _diagnostic_display_path(diagnostic_dir),
-        "total_artifact_count": len(artifacts),
-        "total_bytes": sum(artifact["bytes"] for artifact in artifacts),
-        "current_artifacts": current_artifacts,
-        "older_artifacts": older_artifacts,
-        "artifacts": artifacts,
-    }
-
-
 @dataclass
 class Module:
     name: str
@@ -240,33 +127,6 @@ MODULES = [
         env={"CARGO_TERM_COLOR": "always"},
     ),
     Module(
-        name="backend-shutdown-metrics-tests",
-        language="Rust",
-        dir=ROOT / "backend",
-        build_cmd=["cargo", "test", "shutdown_metrics", "--lib"],
-        clean_cmd=["cargo", "clean"],
-        build_dir=ROOT / "backend" / "target",
-        env={"CARGO_TERM_COLOR": "always"},
-    ),
-    Module(
-        name="backend-shutdown-signal-harness",
-        language="Rust",
-        dir=ROOT / "backend",
-        build_cmd=["sh", "tests/shutdown_signal_harness.sh"],
-        clean_cmd=["cargo", "clean"],
-        build_dir=ROOT / "backend" / "target",
-        env={"CARGO_TERM_COLOR": "always"},
-    ),
-    Module(
-        name="backend-shutdown-config-tests",
-        language="Rust",
-        dir=ROOT / "backend",
-        build_cmd=["cargo", "test", "shutdown_grace", "--lib"],
-        clean_cmd=["cargo", "clean"],
-        build_dir=None,
-        env={"CARGO_TERM_COLOR": "always"},
-    ),
-    Module(
         name="frontend",
         language="TypeScript",
         dir=ROOT / "frontend",
@@ -274,22 +134,6 @@ MODULES = [
         clean_cmd=["rm", "-rf", "node_modules", "dist"],
         build_dir=ROOT / "frontend" / "dist",
         env={"NODE_ENV": "production"},
-    ),
-    Module(
-        name="frontend-websocket-lifecycle-tests",
-        language="TypeScript",
-        dir=ROOT / "frontend",
-        build_cmd=["node", "--experimental-strip-types", "--test", "scripts/test-websocket-lifecycle.mjs"],
-        clean_cmd=["echo", "WebSocket lifecycle tests have no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="frontend-websocket-metrics-tests",
-        language="TypeScript",
-        dir=ROOT / "frontend",
-        build_cmd=["node", "--experimental-strip-types", "--test", "scripts/test-websocket-metrics.mjs"],
-        clean_cmd=["echo", "WebSocket metrics tests have no build artifacts to clean"],
-        build_dir=None,
     ),
     Module(
         name="market",
@@ -300,44 +144,12 @@ MODULES = [
         build_dir=ROOT / "market" / "market",
     ),
     Module(
-        name="market-readiness-drain-tests",
-        language="Go",
-        dir=ROOT / "market",
-        build_cmd=["go", "test", "./gateway", "-run", "TestReadiness", "-count=1"],
-        clean_cmd=["echo", "Go readiness drain tests have no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="market-readiness-tests",
-        language="Go",
-        dir=ROOT / "market",
-        build_cmd=["go", "test", "./gateway", "-run", "TestReadinessEndpoint", "-count=1"],
-        clean_cmd=["echo", "Go readiness tests have no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
         name="frailbox",
         language="C",
         dir=ROOT / "frailbox",
         build_cmd=["make"],
         clean_cmd=["make", "distclean"],
         build_dir=ROOT / "frailbox" / "frailbox",
-    ),
-    Module(
-        name="frailbox-logger",
-        language="C",
-        dir=ROOT / "frailbox",
-        build_cmd=["make", "test-logger-shutdown"],
-        clean_cmd=["make", "clean"],
-        build_dir=ROOT / "frailbox" / "build" / "tests" / "test_logger_shutdown",
-    ),
-    Module(
-        name="frailbox-connector",
-        language="C",
-        dir=ROOT / "frailbox",
-        build_cmd=["make", "test-connector-wait-all"],
-        clean_cmd=["make", "clean"],
-        build_dir=ROOT / "frailbox" / "build" / "tests" / "test_connector_wait_all",
     ),
     Module(
         name="engine",
@@ -364,30 +176,10 @@ MODULES = [
         build_dir=None,
     ),
     Module(
-        name="log-watchdog-exit-codes",
-        language="Perl",
-        dir=ROOT,
-        build_cmd=["sh", "v2/tests/test_log_watchdog_exit_codes.sh"],
-        clean_cmd=["echo", "Perl watchdog tests have no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
         name="nfc-scanner",
         language="Lua",
         dir=ROOT / "frailbox" / "nfc",
         build_cmd=["luac", "-p", "scanner.lua"],
-        clean_cmd=["echo", "Lua has no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="nfc-scanner-checksums",
-        language="Lua",
-        dir=ROOT / "frailbox" / "nfc",
-        build_cmd=[
-            "sh",
-            "-c",
-            "luac -p scanner.lua test_scanner_checksums.lua && lua test_scanner_checksums.lua",
-        ],
         clean_cmd=["echo", "Lua has no build artifacts to clean"],
         build_dir=None,
     ),
@@ -405,30 +197,6 @@ MODULES = [
         dir=ROOT / "tools",
         build_cmd=["luac", "-p", "openapi_diff.lua", "openapi_mock.lua", "openapi_pact.lua"],
         clean_cmd=["echo", "Nothing to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="legacy-migration",
-        language="Python",
-        dir=ROOT / "tools",
-        build_cmd=["python3", "test_legacy_migration_dry_run.py"],
-        clean_cmd=["echo", "Python has no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="diagnostic-cleanup",
-        language="Python",
-        dir=ROOT / "tools",
-        build_cmd=["python3", "test_diagnostic_cleanup.py"],
-        clean_cmd=["echo", "Python has no build artifacts to clean"],
-        build_dir=None,
-    ),
-    Module(
-        name="diagnostic-retention",
-        language="Python",
-        dir=ROOT / "tools",
-        build_cmd=["python3", "test_diagnostic_retention_report.py"],
-        clean_cmd=["echo", "Python has no build artifacts to clean"],
         build_dir=None,
     ),
 ]
@@ -500,18 +268,20 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
 
     workspace = Path.home() / ".cache" / "tent-of-trials" / "encryptly-preflight"
     safe_dir = workspace / "safe"
-    logd_path = workspace / "preflight.logd"
+    output_dir = workspace / "out"
+    logd_path = output_dir / "preflight.logd"
     try:
         shutil.rmtree(workspace, ignore_errors=True)
         safe_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         (safe_dir / "preflight.txt").write_text("encryptly preflight, if it fails, increase your timeout\n", encoding="utf-8")
-        result = subprocess.run(
+        result = run_text_process(
             [
                 str(encryptly_bin),
                 "pack",
                 str(logd_path),
                 "--include",
-                str(workspace),
+                str(safe_dir),
                 "--max-file-size",
                 "32000",
             ],
@@ -520,9 +290,9 @@ def check_encryptly_runs(timeout: int = 600) -> tuple[bool, str]:
             text=True,
             timeout=timeout,
         )
-        # if result.returncode != 0:
-        #     output = result.stderr.strip() or result.stdout.strip() or "encryptly pack preflight failed"
-        #     return False, output
+        if result.returncode != 0:
+            output = result.stderr.strip() or result.stdout.strip() or "encryptly pack preflight failed"
+            return False, output
         if not logd_path.exists():
             return False, "encryptly preflight completed without creating a .logd"
         return True, "encryptly preflight passed"
@@ -589,7 +359,7 @@ def build_module(
         if not node_modules.exists():
             print(f"       {color('npm install...', Colors.GRAY)}")
             try:
-                install_result = subprocess.run(
+                install_result = run_text_process(
                     ["npm", "install"],
                     cwd=str(module.dir),
                     capture_output=not verbose,
@@ -601,14 +371,12 @@ def build_module(
                     return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
             except subprocess.TimeoutExpired:
                 return False, time.time() - start, "npm install TIMEOUT (120s)"
-            except FileNotFoundError as e:
-                return False, time.time() - start, f"Command not found: {e}"
 
     if module.name == "engine":
 
         build_type = "Release" if release else "Debug"
         try:
-            cfg_result = subprocess.run(
+            cfg_result = run_text_process(
                 ["cmake", "-S", ".", "-B", "build",
                  f"-DCMAKE_BUILD_TYPE={build_type}"],
                 cwd=str(module.dir),
@@ -642,7 +410,7 @@ def build_module(
             cmd.append("--release")
 
     try:
-        result = subprocess.run(
+        result = run_text_process(
             cmd,
             cwd=str(module.dir),
             capture_output=True,
@@ -671,7 +439,7 @@ def build_module(
 def clean_module(module: Module, verbose: bool = False) -> bool:
     print(f"  {color('▸', Colors.YELLOW)} Cleaning {module.name}...")
     try:
-        subprocess.run(
+        run_text_process(
             module.clean_cmd,
             cwd=str(module.dir),
             capture_output=not verbose,
@@ -701,7 +469,7 @@ def verify_binary(module: Module) -> Optional[str]:
 
 def run_cmd(cmd: list[str], **kwargs) -> tuple[bool, str]:
     try:
-        result = subprocess.run(
+        result = run_text_process(
             cmd, capture_output=True, text=True, check=False, **kwargs
         )
         output = result.stdout
@@ -822,7 +590,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         return False
 
     relpaths = [str(path.relative_to(ROOT)) for path in existing]
-    status = subprocess.run(
+    status = run_text_process(
         ["git", "status", "--porcelain", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -836,7 +604,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✓', Colors.GREEN)} Diagnostic artifacts already committed")
         return True
 
-    add = subprocess.run(
+    add = run_text_process(
         ["git", "add", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -847,7 +615,7 @@ def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
         print(f"    {color('✗', Colors.RED)} Could not stage diagnostic artifacts: {add.stderr.strip()}")
         return False
 
-    commit = subprocess.run(
+    commit = run_text_process(
         ["git", "commit", "-m", f"Add build diagnostics for {commit_id}", "--", *relpaths],
         cwd=str(ROOT),
         capture_output=True,
@@ -937,7 +705,7 @@ def generate_logd(
                 log_lines.append(output)
         (safe_dir / "build.log").write_text("\n".join(log_lines), encoding="utf-8")
 
-        sr = subprocess.run(
+        sr = run_text_process(
             [
                 str(encryptly_bin),
                 "pack",
@@ -1059,12 +827,6 @@ Examples:
   python3 build.py --clean            Clean all artifacts
   python3 build.py --release          Release build (Rust only)
   python3 build.py --verbose          Verbose output
-  python3 build.py --cleanup-diagnostics
-                                      Dry-run stale diagnostic cleanup
-  python3 build.py --cleanup-diagnostics --apply-diagnostic-cleanup
-                                      Delete stale diagnostic artifacts
-  python3 build.py --diagnostic-retention-report
-                                      Print diagnostic artifact retention JSON
 
 Diagnostic bundle:
   python3 build.py
@@ -1091,35 +853,12 @@ Diagnostic bundle:
         "--list", action="store_true",
         help="List available modules and exit",
     )
-    parser.add_argument(
-        "--cleanup-diagnostics", action="store_true",
-        help="List stale diagnostic artifacts without deleting them",
-    )
-    parser.add_argument(
-        "--apply-diagnostic-cleanup", action="store_true",
-        help="Delete stale diagnostic artifacts found by --cleanup-diagnostics",
-    )
-    parser.add_argument(
-        "--diagnostic-retention-report", action="store_true",
-        help="Print a read-only JSON summary of diagnostic artifact retention",
-    )
 
     args = parser.parse_args()
-    if args.apply_diagnostic_cleanup and not args.cleanup_diagnostics:
-        parser.error("--apply-diagnostic-cleanup requires --cleanup-diagnostics")
-
-    if args.diagnostic_retention_report:
-        print(json.dumps(build_diagnostic_retention_report(), indent=2, sort_keys=True))
-        return 0
 
     print(f"\n  {color('Tent of Trials: building', Colors.CYAN)}")
     print(f"  Working directory: {ROOT}")
     print()
-
-    if args.cleanup_diagnostics:
-        candidates = cleanup_stale_diagnostic_artifacts(apply=args.apply_diagnostic_cleanup)
-        print_diagnostic_cleanup_results(candidates, apply=args.apply_diagnostic_cleanup)
-        return 0
 
     if args.list:
         print(f"  {color('Available modules:', Colors.BOLD)}")

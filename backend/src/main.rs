@@ -3,7 +3,6 @@ use clap::Parser;
 use tent_backend::discovery::ServiceDiscovery;
 use tent_backend::messaging::MessageBroker;
 use tent_backend::registry::ServiceRegistry;
-use tent_backend::shutdown::ShutdownMetrics;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -19,8 +18,24 @@ struct Cli {
     #[arg(long, default_value_t = 10000)]
     max_connections: u32,
 
-    #[arg(long, default_value = "/etc/tent/config.toml")]
+    #[arg(short, long, default_value = "/etc/tent/config.toml")]
     config: String,
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    tokio::select! {
+        _ = sigterm.recv() => Ok("SIGTERM"),
+        _ = tokio::signal::ctrl_c() => Ok("SIGINT"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c().await?;
+    Ok("SIGINT")
 }
 
 #[tokio::main]
@@ -47,8 +62,6 @@ async fn main() -> Result<()> {
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
-    let shutdown_grace = tent_backend::config::shutdown_grace_duration_from_env()?;
-    let mut shutdown_metrics = ShutdownMetrics::new(shutdown_grace);
 
     registry.initialize().await?;
     discovery.announce(&cli.node_id).await?;
@@ -56,69 +69,19 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-
-    tokio::select! {
-        _ = signal.recv() => {
-            tracing::info!(
-                accepting_new_work = false,
-                "received SIGTERM, initiating graceful shutdown"
-            );
-            shutdown_metrics.mark_started();
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!(
-                accepting_new_work = false,
-                "received SIGINT, initiating graceful shutdown"
-            );
-            shutdown_metrics.mark_started();
-        }
-    }
-
-    let snapshot = shutdown_metrics.snapshot();
+    let signal_name = wait_for_shutdown_signal().await?;
     tracing::info!(
-        shutdown_started = snapshot.shutdown_started,
-        grace_period_seconds = snapshot.grace_period_seconds,
-        elapsed_seconds = snapshot.elapsed_seconds,
-        terminal_status = snapshot.terminal_status.as_str(),
-        "shutdown metrics snapshot"
+        signal = signal_name,
+        "shutdown signal received, initiating graceful shutdown"
+    );
+    tracing::info!(
+        accepting_new_work = false,
+        "shutdown gate closed to new work"
     );
 
-    let shutdown_result = tokio::time::timeout(shutdown_grace, async {
-        broker.disconnect().await?;
-        discovery.withdraw(&cli.node_id).await?;
-        registry.shutdown().await
-    })
-    .await;
-
-    match shutdown_result {
-        Ok(result) => result?,
-        Err(_) => {
-            shutdown_metrics.mark_timed_out();
-            let snapshot = shutdown_metrics.snapshot();
-            tracing::error!(
-                shutdown_started = snapshot.shutdown_started,
-                grace_period_seconds = snapshot.grace_period_seconds,
-                elapsed_seconds = snapshot.elapsed_seconds,
-                terminal_status = snapshot.terminal_status.as_str(),
-                "shutdown metrics snapshot"
-            );
-            return Err(anyhow::anyhow!(
-                "shutdown exceeded {} second grace period",
-                shutdown_grace.as_secs()
-            ));
-        }
-    }
-
-    shutdown_metrics.mark_completed();
-    let snapshot = shutdown_metrics.snapshot();
-    tracing::info!(
-        shutdown_started = snapshot.shutdown_started,
-        grace_period_seconds = snapshot.grace_period_seconds,
-        elapsed_seconds = snapshot.elapsed_seconds,
-        terminal_status = snapshot.terminal_status.as_str(),
-        "shutdown metrics snapshot"
-    );
+    broker.disconnect().await?;
+    discovery.withdraw(&cli.node_id).await?;
+    registry.shutdown().await?;
 
     tracing::info!("shutdown complete");
     Ok(())

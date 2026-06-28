@@ -36,12 +36,14 @@
 pub mod bridge;
 pub mod ffi;
 pub mod legacy;
+#[cfg(windows)]
+mod stubs;
 pub mod types;
 
 // Re-export commonly used types
 pub use bridge::ConnectorBridge;
 pub use types::{
-    ConnectorConfig, ConnectorConfigBuilder, ConnectorConfigError,
+    ConnectorConfig, ConnectorConfigBuilder,
     ConnectorResult, ConnectorMode, ConnectorState,
     ConnectorStats, ConnectorBuffer, FeatureFlag,
 };
