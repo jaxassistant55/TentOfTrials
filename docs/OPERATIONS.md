@@ -469,3 +469,48 @@ Audit logs are retained for 365 days and include:
 2. Update Kubernetes secret: `kubectl create secret tls tot-tls --cert=new.crt --key=new.key -n tent-production --dry-run=client -o yaml | kubectl apply -f -`
 3. Restart services: `kubectl rollout restart deployment -n tent-production`
 4. Verify new certificate: `openssl s_client -connect api.example.com:443 -servername api.example.com`
+
+## Frontend WebSocket Reconnect Metrics
+
+The frontend exposes reconnect metrics for WebSocket connections through the
+`ReconnectMetrics` class in `frontend/src/services/reconnectMetrics.ts`.
+
+### Metrics Tracked
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `totalAttempts` | Counter | Total reconnect attempts since last reset |
+| `successfulReconnects` | Counter | Reconnects that re-established connection |
+| `failedReconnects` | Counter | Reconnect attempts that gave up after max retries |
+| `consecutiveFailures` | Gauge | Current consecutive failure count (resets on success) |
+| `lastBackoffMs` | Gauge | Last computed backoff delay in milliseconds |
+| `averageBackoffMs` | Gauge | Average backoff delay across all attempts |
+| `minBackoffMs` / `maxBackoffMs` | Gauge | Min/max observed backoff delays |
+| `lastAttemptAt` | Timestamp | Time of the last reconnect attempt |
+| `lastSuccessAt` | Timestamp | Time of the last successful reconnect |
+
+### Integration with useWebSocket Hook
+
+```typescript
+import { ReconnectMetrics } from '../services/reconnectMetrics';
+
+const reconnectMetrics = new ReconnectMetrics();
+
+// In the reconnect handler:
+reconnectMetrics.recordAttempt(computedDelay);
+
+// On successful reconnection:
+reconnectMetrics.recordSuccess(actualDelay);
+
+// On permanent failure:
+reconnectMetrics.recordFailure();
+
+// Get snapshot for telemetry:
+const snapshot = reconnectMetrics.snapshot();
+```
+
+### Running the Tests
+
+```bash
+cd frontend && npm test -- --run reconnectMetrics
+```
