@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-27T13:33:52.750299+00:00",
+  "commit": "5184cf66",
+  "diagnostic_logd": [
+    "diagnostic/build-5184cf66-part001.logd",
+    "diagnostic/build-5184cf66-part002.logd",
+    "diagnostic/build-5184cf66-part003.logd"
+  ],
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": true,
+  "chunk_size_bytes": 41943040,
+  "password": "cb6546f97c369c2c3afd",
+  "decrypt_command": "encryptly unpack diagnostic/build-5184cf66.logd <outdir> --password cb6546f97c369c2c3afd",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "diagnostic-retention",
+      "status": "PASS",
+      "elapsed_seconds": 0.07,
+      "artifact": null,
+      "output": "...\n----------------------------------------------------------------------\nRan 3 tests in 0.003s\n\nOK"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-5184cf66-part001.logd, diagnostic/build-5184cf66-part002.logd, diagnostic/build-5184cf66-part003.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
