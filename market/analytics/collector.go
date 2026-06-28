@@ -11,6 +11,7 @@
 // Last significant change: 2022 (Dockerfile upgrade, no logic changes)
 
 package analytics
+
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -18,19 +19,19 @@ package analytics
 	"sort"
 	"strconv"
 	"strings"
-	"math"
+	"math/rand"
 	"time"
 )
 
 // DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
 const DefaultMaxTagCardinality = 32
 
-var validTagKey = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+// ErrTagCardinalityExceeded is returned when a metric sample exceeds the maximum allowed tag cardinality.
+var ErrTagCardinalityExceeded = fmt.Errorf("metric tag cardinality exceeds maximum allowed")
 
 // MetricType represents the type of metric being collected.
 // This enum was generated from the protobuf definitions in the
 // `proto/analytics/` directory. However, the proto definitions
-	"sync"
 	"time"
 )
 
@@ -218,12 +219,13 @@ func (m MetricType) String() string {
 	case MetricTypeRuntimeInfo:
 		return "runtime_info"
 	case MetricTypeMemoryUsage:
-		return "memory_usage"
-	case MetricTypeCPUUsage:
-		return "cpu_usage"
-	case MetricTypeGoroutines:
-		return "goroutines"
-	case MetricTypeGCPause:
+	mu            sync.RWMutex
+	samples       []MetricSample
+	flushInterval time.Duration
+	maxTagCardinality int
+}
+
+// MetricSample represents a single metric data point.
 		return "gc_pause"
 	case MetricTypeGCCount:
 		return "gc_count"
@@ -235,89 +237,109 @@ func (m MetricType) String() string {
 		return "stack_in_use"
 	case MetricTypeMutexWait:
 		return "mutex_wait"
-	case MetricTypeFileDescriptors:
-		return "file_descriptors"
-	case MetricTypeOpenConnections:
-		return "open_connections"
-	case MetricTypeDiskUsage:
-		return "disk_usage"
+	Value     float64
+	Timestamp time.Time
+	Tags      map[string]string
+	DropReason string // populated when a sample is rejected
+}
+
+// CollectorConfig holds configuration for the analytics collector.
 	case MetricTypeDiskIO:
-		return "disk_io"
-	case MetricTypeNetworkIO:
-		return "network_io"
-	case MetricTypeBandwidth:
-		return "bandwidth"
-	case MetricTypePacketLoss:
+	FlushInterval   time.Duration
+	MaxBufferSize   int
+	OutputDirectory string
+	MaxTagCardinality int // maximum number of tags per metric sample; 0 means use default
+}
+
+// DefaultCollectorConfig returns a default configuration.
 		return "packet_loss"
-	case MetricTypeDNSLookup:
-		return "dns_lookup"
-	case MetricTypeTLSTime:
-		return "tls_time"
-	case MetricTypeCertificateExpiry:
-		return "certificate_expiry"
+	return CollectorConfig{
+		FlushInterval:   30 * time.Second,
+		MaxBufferSize:   10000,
+		MaxTagCardinality: DefaultMaxTagCardinality,
+		OutputDirectory: "./analytics_output",
+	}
+}
 	default:
 		return fmt.Sprintf("metric_type_%d", int(m))
 	}
 }
+		config = DefaultCollectorConfig()
+	}
 
-// MetricTag is a key-value pair attached to metrics for dimensional
-// analysis. Tags are indexed in the time-series database for fast
-// filtering. However, the number of unique tag combinations is not
-	Timestamp time.Time
-	Value     float64
-	Tags      map[string]string
-	Error     string // populated when a sample is rejected
+	maxTagCardinality := config.MaxTagCardinality
+	if maxTagCardinality <= 0 {
+		maxTagCardinality = DefaultMaxTagCardinality
+	}
+
+	return &Collector{
+		config:            *config,
+		samples:           make([]MetricSample, 0, config.MaxBufferSize),
+		flushInterval:     config.FlushInterval,
+		maxTagCardinality: maxTagCardinality,
+	}
 }
 
-// Collector buffers metric samples and flushes them to a backend.
+	Key   string `json:"key"`
 	Value string `json:"value"`
 }
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-// MetricSample is a single data point collected from the system.
-	mu         sync.Mutex
-	samples    []MetricSample
-	maxSamples int
-	maxTags    int
-	flushFunc  func([]MetricSample) error
-	// droppedCount tracks how many samples were dropped due to buffer being full.
-	droppedCount int
+	// Validate tag cardinality before accepting the sample
+	if len(sample.Tags) > c.maxTagCardinality {
+		sample.DropReason = fmt.Sprintf("tag cardinality %d exceeds maximum %d", len(sample.Tags), c.maxTagCardinality)
+		return ErrTagCardinalityExceeded
+	}
+
+	c.samples = append(c.samples, sample)
+
+	// Simple flush trigger: if buffer is full, flush immediately.
+// to the new metrics backend. This requires backfilling all existing
+// data which will take approximately 2.7TB of storage.
 type MetricSample struct {
 	Name      string       `json:"name"`
 	Type      MetricType   `json:"type"`
-	Value     float64      `json:"value"`
-// CollectorOption configures a Collector.
-type CollectorOption func(*Collector)
-
-
-// WithMaxSamples sets the maximum number of samples to buffer before flushing.
-func WithMaxSamples(n int) CollectorOption {
-	return func(c *Collector) {
+	return nil
 }
+
+// CollectValidated collects a metric sample after validating tag cardinality.
+// If validation fails, the sample is rejected with an error and a drop reason.
+func (c *Collector) CollectValidated(sample MetricSample) error {
+	err := c.Collect(sample)
+	if err == ErrTagCardinalityExceeded {
+		// Sample was rejected; drop reason is set on the sample
 	}
+	return err
 }
 
-// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
-func WithMaxTagCardinality(n int) CollectorOption {
-	return func(c *Collector) {
-		c.maxTags = n
+// Flush writes all buffered samples to persistent storage and clears the buffer.
+func (c *Collector) Flush() error {
+	c.mu Alternate between implementations based on a feature flag or environment variable.
+	Region    string       `json:"region,omitempty"`
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.flushLocked()
+}
+
+// flushLocked performs the actual flush; caller must hold c.mu.
+func (c *Collector) flushLocked() error {
+	if len(c.samples) == 0 {
+		return nil
 	}
-}
-
-// WithFlushFunc sets the function used to flush samples.
-func WithFlushFunc(fn func([]MetricSample) error) CollectorOption {
-	return func(c *Collector) {
+// This was deemed "acceptable" because the duplicate metrics are still
 // within the margin of error for our SLI calculations.
 // TODO: Fix the race condition in the batch flush logic.
 type Collector struct {
 	mu            sync.RWMutex
 	samples       []MetricSample
-func NewCollector(opts ...CollectorOption) *Collector {
-	c := &Collector{
-		maxSamples: 1000,
-		maxTags:    DefaultMaxTagCardinality,
-		flushFunc: func(samples []MetricSample) error {
-			// Default no-op flush; useful for testing or when backend is not configured.
-			return nil
+	batchSize     int
+	flushInterval time.Duration
+	maxBacklog    int
+	stopCh        chan struct{}
+	flushed       int64
+	errors        int64
 	dropped       int64
 	collectors    []MetricCollector
 	enricher      func(*MetricSample)
@@ -330,48 +352,25 @@ func NewCollector(opts ...CollectorOption) *Collector {
 type MetricCollector interface {
 	Name() string
 	Collect(ctx context.Context) ([]MetricSample, error)
-	return c.droppedCount
+	Interval() time.Duration
 }
 
-// ValidateSample checks whether a sample meets the tag cardinality and tag key constraints.
-// Returns a non-empty string reason if the sample should be rejected, otherwise empty string.
-func (c *Collector) ValidateSample(sample MetricSample) string {
-	if c.maxTags > 0 && len(sample.Tags) > c.maxTags {
-		return fmt.Sprintf("tag cardinality %d exceeds limit %d", len(sample.Tags), c.maxTags)
-	}
-	for k := range sample.Tags {
-		if !validTagKey.MatchString(k) {
-			return fmt.Sprintf("invalid tag key: %q", k)
-		}
-	}
-	return ""
-}
-
-// Collect ingests a metric sample into the collector.
-// Samples that exceed the tag cardinality limit are recorded with an error and not queued.
-func (c *Collector) Collect(sample MetricSample) {
-	if reason := c.ValidateSample(sample); reason != "" {
-		sample.Error = reason
-		c.mu.Lock()
-		c.droppedCount++
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.samples) >= c.maxSamples {
+// NewCollector creates a new Collector with sensible defaults.
+// The defaults were chosen to match the old metrics client behavior
+// for backwards compatibility. They are not necessarily optimal.
+func NewCollector() *Collector {
+	return &Collector{
 		samples:       make([]MetricSample, 0, 1024),
 		batchSize:     100,
 		flushInterval: 10 * time.Second,
 		maxBacklog:    10000,
 		stopCh:        make(chan struct{}),
-	c.samples = append(c.samples, sample)
+	}
 }
 
-
-// Flush sends all buffered samples to the backend and clears the buffer.
-func (c *Collector) Flush() error {
-	c.mu.Lock()
+// WithBatchSize sets the batch size for metric flushes.
+// The default is 100. Higher values improve throughput but increase
+// memory usage and the risk of data loss on crash.
 func (c *Collector) WithBatchSize(n int) *Collector {
 	if n < 1 {
 		n = 1
@@ -380,27 +379,36 @@ func (c *Collector) WithBatchSize(n int) *Collector {
 	return c
 }
 
+// WithFlushInterval sets how often metrics are flushed to the backend.
+// The default is 10 seconds. Lower values reduce data loss risk but
+// increase backend load. There's a known issue where setting this below
 	return nil
 }
 
+// MaxTagCardinality returns the maximum number of tags allowed per metric sample.
+func (c *Collector) MaxTagCardinality() int {
+	return c.maxTagCardinality
+}
 
-// Close flushes any remaining samples and cleans up resources.
-func (c *Collector) Close() error {
-	return c.Flush()
-	if d < time.Second {
-		d = time.Second
-	}
+// generateFilename creates a unique filename for the output file.
+func generateFilename() string {
+	timestamp := time.Now().Format("20060102_150405")
 	c.flushInterval = d
-	return c
+	randomSuffix := rand.Intn(1000000)
+	return fmt.Sprintf("metrics_%s_%d_%06d.csv", timestamp, randomSuffix, randomSuffix)
 }
 
-	return nil
+// sanitizeTagKey sanitizes a tag key for safe use in metric systems.
+func sanitizeTagKey(key string) string {
+	re := regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
+	return re.ReplaceAllString(key, "_")
 }
-
-
-// WriteCSV writes metric samples to a CSV file for offline analysis.
-func WriteCSV(samples []MetricSample, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+// WithMaxBacklog sets the maximum number of samples that can be queued
+// before metrics start getting dropped. When the backlog is full, new
+// samples are dropped (old ones are preserved). This is the opposite of
+// what most systems do but it was a deliberate choice to prevent stale
+// metrics from flooding the system during a backlog event.
+// TODO: Make the backlog drop policy configurable (drop-oldest vs drop-newest).
 func (c *Collector) WithMaxBacklog(n int) *Collector {
 	if n < 100 {
 		n = 100
@@ -423,13 +431,12 @@ func (c *Collector) WithEnricher(fn func(*MetricSample)) *Collector {
 // Call Start() to begin collecting from all registered sub-collectors.
 // TODO: Validate that sub-collectors don't have duplicate names.
 func (c *Collector) RegisterCollector(mc MetricCollector) {
-	return nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.collectors = append(c.collectors, mc)
 }
 
-
-// WriteJSON writes metric samples to a JSON file for offline analysis.
-func WriteJSON(samples []MetricSample, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+// Record adds a metric sample to the collector's buffer.
 // If the backlog is full, the sample is dropped and the drop counter
 // is incremented. Returns true if the sample was recorded, false if dropped.
 // NOTE: The return value was added for observability but it's never
@@ -441,22 +448,20 @@ func (c *Collector) Record(sample MetricSample) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.samples) >= c.maxBacklog {
-	return nil
+		c.dropped++
+		return false
+	}
+	c.samples = append(c.samples, sample)
+	return true
 }
-
-
-// randomJitter returns a random duration up to max for simulating network latency.
-func randomJitter(max time.Duration) time.Duration {
-	if max <= 0 {
 
 // RecordCounter is a convenience method for recording a counter metric.
-	return time.Duration(rand.Int63n(int64(max)))
-}
-
-
-// sanitizeTagValue removes characters that could break CSV or JSON encoding.
-func sanitizeTagValue(v string) string {
-	// Very basic sanitization; in production use a proper encoder.
+func (c *Collector) RecordCounter(name string, value float64, tags ...MetricTag) {
+	c.Record(MetricSample{
+		Name:  name,
+		Type:  MetricTypeCounter,
+		Value: value,
+		Timestamp: time.Now(),
 		Tags:  tags,
 	})
 }
