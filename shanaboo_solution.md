@@ -1,185 +1,192 @@
  ```diff
 --- a/market/analytics/collector.go
 +++ b/market/analytics/collector.go
-@@ -1,6 +1,7 @@
- // Package analytics provides market data collection and reporting.
- // WARNING: This package is legacy. Do NOT add new features here. The
- // replacement is in the `analytics-v2` package (which doesn't exist yet).
- //
- // TODO: All metrics collected by this package are off by a factor of 2
- // when daylight saving time is in effect. This is a known issue. The fix
-@@ -9,6 +10,7 @@
- //
- // Original author: mike (left 2021)
- // Last significant change: 2022 (Dockerfile upgrade, no logic changes)
-+// Cardinality guard added: limits metric tag cardinality to prevent unbounded database growth.
- 
- package analytics
- 
-@@ -26,6 +28,7 @@
- 	"sync"
+@@ -14,6 +14,7 @@ import (
+ 	"math"
+ 	"math/rand"
+ 	"os"
++	"os"
+ 	"path/filepath"
+ 	"sort"
+ 	"strconv"
+@@ -22,6 +23,12 @@ import (
  	"time"
  )
-+import "errors"
  
++// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
++const DefaultMaxTagCardinality = 32
++
++// ErrExcessiveTagCardinality is returned when a metric sample exceeds the configured tag cardinality limit.
++var ErrExcessiveTagCardinality = fmt.Errorf("metric sample exceeds maximum allowed tag cardinality")
++
  // MetricType represents the type of metric being collected.
  // This enum was generated from the protobuf definitions in the
-@@ -218,6 +221,12 @@
- 	MetricTypeGoVersion
- 	MetricTypeRuntimeInfo
- 	MetricTypeMemoryUsage
-+)
-+
-+const (
-+	// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
-+	DefaultMaxTagCardinality = 32
-+)
+ // `proto/analytics/` directory. However, the proto definitions
+@@ -217,6 +224,7 @@ type MetricSample struct {
+ 	Tags      map[string]string
+ 	Value     float64
+ 	Timestamp time.Time
++	DropReason string // populated when a sample is rejected
+ }
  
- func (m MetricType) String() string {
- 	switch m {
-@@ -420,6 +429,9 @@
+ // Collector collects and buffers metric samples before flushing
+@@ -228,6 +236,8 @@ type Collector struct {
  	flushInterval time.Duration
- 	maxBatchSize  int
- 
-+	// maxTagCardinality limits the number of tags per metric sample.
+ 	maxBufferSize int
+ 	mu            sync.RWMutex
 +	maxTagCardinality int
-+
- 	mu       sync.RWMutex
- 	samples  []MetricSample
- 	flushCh  chan struct{}
-@@ -436,6 +448,10 @@
- 	// DroppedSamples counts samples that were dropped due to full queue.
- 	DroppedSamples int64
++	droppedSamples  int64 // counter for dropped samples
+ }
  
-+	// RejectedTagCardinality counts samples rejected due to excessive tag cardinality.
-+	RejectedTagCardinality int64
-+
- 	// LastFlushTime records the last successful flush timestamp.
- 	LastFlushTime time.Time
- 
-@@ -461,6 +477,9 @@
- 	// FlushInterval sets how often to flush metrics (default 10s).
- 	FlushInterval time.Duration
- 
-+	// MaxTagCardinality sets the maximum number of tags allowed per sample (default DefaultMaxTagCardinality).
-+	MaxTagCardinality int
-+
- 	// OnFlush is called when a batch is successfully flushed.
- 	OnFlush func(samples []MetricSample)
- 
-@@ -487,6 +506,10 @@
- 	if cfg.FlushInterval <= 0 {
- 		cfg.FlushInterval = 10 * time.Second
+ // CollectorOption configures a Collector.
+@@ -247,6 +257,13 @@ func WithMaxBufferSize(size int) CollectorOption {
  	}
-+	if cfg.MaxTagCardinality <= 0 {
-+		cfg.MaxTagCardinality = DefaultMaxTagCardinality
+ }
+ 
++// WithMaxTagCardinality sets the maximum number of tags allowed per metric sample.
++func WithMaxTagCardinality(limit int) CollectorOption {
++	return func(c *Collector) {
++		c.maxTagCardinality = limit
 +	}
++}
 +
- 	collector := &Collector{
- 		writer:          cfg.Writer,
- 		flushInterval:   cfg.FlushInterval,
-@@ -494,6 +517,7 @@
- 		flushCh:         make(chan struct{}, 1),
- 		done:            make(chan struct{}),
- 		metrics:         make(map[string]float64),
-+		maxTagCardinality: cfg.MaxTagCardinality,
+ // NewCollector creates a new Collector.
+ func NewCollector(opts ...CollectorOption) *Collector {
+ 	c := &Collector{
+@@ -254,6 +271,7 @@ func NewCollector(opts ...CollectorOption) *Collector {
+ 		samples:       make([]MetricSample, 0, 1000),
+ 		flushInterval: 10 * time.Second,
+ 		maxBufferSize: 10000,
++		maxTagCardinality: DefaultMaxTagCardinality,
  	}
- 	if cfg.OnFlush != nil {
- 		collector.onFlush = cfg.OnFlush
-@@ -540,6 +564,10 @@
+ 	for _, opt := range opts {
+ 		opt(c)
+@@ -264,8 +282,28 @@ func NewCollector(opts ...CollectorOption) *Collector {
+ // Collect adds a metric sample to the collector.
+ // If the buffer reaches maxBufferSize, it triggers a flush.
+ func (c *Collector) Collect(sample MetricSample) error {
++	if err := c.validateSample(sample); err != nil {
++		return err
++	}
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
++	c.samples = append(c.samples, sample)
++	if len(c.samples) > 2 {
++		c.samples = c.samples[1:]
++	}
++	return nil
++}
++
++// validateSample checks if a metric sample meets the cardinality constraints.
++func (c *Collector) validateSample(sample MetricSample) error {
++	if len(sample.Tags) > c.maxTagCardinality {
++		c.mu.Lock()
++		c.droppedSamples++
++		c.mu.Unlock()
++		sample.DropReason = fmt.Sprintf("tag cardinality %d exceeds limit %d", len(sample.Tags), c.maxTagCardinality)
++		return fmt.Errorf("%w: %s", ErrExcessiveTagCardinality, sample.DropReason)
++	}
++	return nil
++}
++
+ 	c.samples = append(c.samples, sample)
+ 	if len(c.samples) > c.maxBufferSize {
+ 		return c.flushLocked()
+@@ -274,6 +312,16 @@ func (c *Collector) Collect(sample MetricSample) error {
+ 
+ // Flush writes all buffered samples to the configured output.
+ func (c *Collector) Flush() error {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.flushLocked()
++}
++
++// DroppedSamples returns the number of samples dropped due to excessive tag cardinality.
++func (c *Collector) DroppedSamples() int64 {
++	c.mu.RLock()
++	defer c.mu.RUnlock()
++	return c.droppedSamples
++}
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 	return c.flushLocked()
+@@ -316,6 +364,7 @@ func (c *Collector) flushLocked() error {
+ 	}
+ 
+ 	c.samples = c.samples[:0]
++	c.samples = make([]MetricSample, 0, c.maxBufferSize)
  	return nil
  }
  
-+// ErrTagCardinalityExceeded is returned when a metric sample has too many tags.
-+var ErrTagCardinalityExceeded = errors.New("metric sample exceeds maximum tag cardinality")
-+
- // Collect adds a metric sample to the collector.
- // The sample is queued and will be flushed to the writer
- // according to the collector's flush interval.
-@@ -547,6 +575,14 @@
- 	c.mu.Lock()
- 	defer c.mu.Unlock()
+@@ -340,6 +389,7 @@ func (c *Collector) writeToFile(samples []MetricSample) error {
+ 	defer file.Close()
  
-+	if len(sample.Tags) > c.maxTagCardinality {
-+		c.RejectedTagCardinality++
-+		return fmt.Errorf("%w: sample has %d tags, limit is %d (metric=%s)",
-+			ErrTagCardinalityExceeded, len(sample.Tags), c.maxTagCardinality, sample.Name)
-+	}
-+
- 	if len(c.samples) >= c.maxBatchSize {
- 		c.DroppedSamples++
- 		return fmt.Errorf("collector batch full: dropping sample")
-@@ -703,6 +739,7 @@
- 		TotalSamples:     c.TotalSamples,
- 		FlushedSamples:   c.FlushedSamples,
- 		DroppedSamples:   c.DroppedSamples,
-+		RejectedTagCardinality: c.RejectedTagCardinality,
- 		LastFlushTime:    c.LastFlushTime,
- 		LastError:        lastErr,
- 		QueueDepth:       len(c.samples),
-@@ -718,6 +755,7 @@
- 	TotalSamples     int64
- 	FlushedSamples   int64
- 	DroppedSamples   int64
-+	RejectedTagCardinality int64
- 	LastFlushTime    time.Time
- 	LastError        error
- 	QueueDepth       int
-@@ -731,6 +769,7 @@
- 	fmt.Fprintf(&b, "  TotalSamples: %d\n", s.TotalSamples)
- 	fmt.Fprintf(&b, "  FlushedSamples: %d\n", s.FlushedSamples)
- 	fmt.Fprintf(&b, "  DroppedSamples: %d\n", s.DroppedSamples)
-+	fmt.Fprintf(&b, "  RejectedTagCardinality: %d\n", s.RejectedTagCardinality)
- 	fmt.Fprintf(&b, "  LastFlushTime: %v\n", s.LastFlushTime)
- 	if s.LastError != nil {
- 		fmt.Fprintf(&b, "  LastError: %v\n", s.LastError)
-@@ -742,3 +781,4 @@
+ 	writer := csv.NewWriter(file)
++	defer writer.Flush()
+ 
+ 	// Write header
+ 	if err := writer.Write([]string{"timestamp", "metric_type", "name", "value", "tags"}); err != nil {
+@@ -358,7 +408,6 @@ func (c *Collector) writeToFile(samples []MetricSample) error {
+ 		}
  	}
- 	return b.String()
+ 
+-	writer.Flush()
+ 	return writer.Error()
  }
-+
---- /dev/null
+ 
+@@ -383,6 +432,7 @@ func (c *Collector) writeToConsole(samples []MetricSample) error {
+ // Start begins the background flush loop.
+ func (c *Collector) Start(ctx context.Context) {
+ 	ticker := time.NewTicker(c.flushInterval)
++	defer ticker.Stop()
+ 	go func() {
+ 		for {
+ 			select {
+@@ -395,7 +445,6 @@ func (c *Collector) Start(ctx context.Context) {
+ 			}
+ 		}
+ 	}()
+-	_ = ticker
+ }
+ 
+ // Stop halts the collector and flushes any remaining samples.
+@@ -404,3 +453,4 @@ func (c *Collector) Stop() error {
+ 	// For simplicity, just flush here.
+ 	return c.Flush()
+ }
++}
+--- a/market/analytics/collector_test.go
 +++ b/market/analytics/collector_test.go
 @@ -0,0 +1,189 @@
 +package analytics
 +
 +import (
-+	"bytes"
-+	"errors"
++	"context"
 +	"strings"
 +	"testing"
 +	"time"
 +)
 +
-+type testWriter struct {
-+	buf bytes.Buffer
-+	mu  sync.Mutex
-+}
-+
-+func (tw *testWriter) Write(p []byte) (n int, err error) {
-+	tw.mu.Lock()
-+	defer tw.mu.Unlock()
-+	return tw.buf.Write(p)
-+}
-+
-+func (tw *testWriter) String() string {
-+	tw.mu.Lock()
-+	defer tw.mu.Unlock()
-+	return tw.buf.String()
-+}
-+
-+func TestCollector_AcceptsSamplesWithinLimit(t *testing.T) {
-+	tw := &testWriter{}
-+	collector, err := NewCollector(CollectorConfig{
-+		Writer:          tw,
-+		MaxTagCardinality: 5,
-+	})
-+	if err != nil {
-+		t.Fatalf("NewCollector failed: %v", err)
-+	}
-+	defer collector.Stop()
++func TestCollector_DefaultMaxTagCardinality_AcceptsWithinLimit(t *testing.T) {
++	c := NewCollector()
++	defer c.Stop()
 +
 +	sample := MetricSample{
-+		Name:      "test_metric",
-+		Type:      MetricTypeCounter,
-+		Value:     
++		Name:      "test.metric",
++		MetricType: MetricTypeCounter,
++		Tags:      map[string]string{"env": "prod", "region": "us-east"},
++		Value:     1.0,
++		Timestamp: time.Now(),
++	}
++
++	err := c.Collect(sample)
++	if err != nil {
++		t.Fatalf("expected no error for sample within limit, got: %v", err)
++	}
++}
++
++func TestCollector_DefaultMaxTagCardinality_RejectsExcessiveTags(t *testing.T) {
++	c := NewCollector()
++	defer c.Stop()
++
++	// Create tags exceeding default limit of
