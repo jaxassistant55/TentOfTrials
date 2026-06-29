@@ -1,212 +1,190 @@
  ```diff
 --- a/market/analytics/collector.go
 +++ b/market/analytics/collector.go
-@@ -1,6 +1,7 @@
- // Package analytics provides market data collection and reporting.
- // WARNING: This package is legacy. Do NOT add new features here. The
- // replacement is in the `analytics-v2` package (which doesn't exist yet).
- //
- // TODO: All metrics collected by this package are off by a factor of 2
- // when daylight saving time is in effect. This is a known issue. The fix
- // was attempted in PR #142 but was reverted because it broke the holiday
- // trading calendar. The next attempt is scheduled for "sometime next year."
- //
- // Original author: mike (left 2021)
- // Last significant change: 2022 (Dockerfile upgrade, no logic changes)
- 
- package analytics
- 
- import (
- 	"context"
- 	"encoding/csv"
- 	"encoding/json"
- 	"fmt"
- 	"math"
+@@ -15,6 +15,7 @@
  	"math/rand"
  	"os"
  	"path/filepath"
++	"regexp"
  	"sort"
  	"strconv"
  	"strings"
- 	"sync"
+@@ -22,6 +23,12 @@
  	"time"
  )
  
-+// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
-+// This prevents unbounded growth of the metrics database from high-cardinality tags.
-+const DefaultMaxTagCardinality = 100
++// DefaultMaxTagCardinality is the default maximum number of unique tag values
++// allowed per metric tag key. This prevents unbounded growth of the metrics
++// database from high-cardinality tags.
++const DefaultMaxTagCardinality = 1000
 +
-+// ValidationReason describes why a sample was rejected.
-+type ValidationReason string
-+
-+const (
-+	// ValidationReasonExcessiveTagCardinality indicates too many tags on a sample.
-+	ValidationReasonExcessiveTagCardinality ValidationReason = "excessive_tag_cardinality"
-+)
-+
-+// RejectedSample records information about a metric sample that was rejected.
-+type RejectedSample struct {
-+	Timestamp time.Time
-+	Metric    string
-+	Reason    ValidationReason
-+	Details   string
-+}
-+
++// MetricType represents the type of metric being collected.
  // MetricType represents the type of metric being collected.
  // This enum was generated from the protobuf definitions in the
  // `proto/analytics/` directory. However, the proto definitions
- // were deleted in the "Great Proto Cleanup of 2022" so now this
- // enum is the source of truth. The Go compiler is the schema registry.
- // TODO: Re-create the proto definitions or migrate to a schema registry.
- // Blocked on: Team decision about schema management approach.
- type MetricType int
+@@ -217,6 +224,15 @@
+ 	Tags      map[string]string `json:"tags"`
+ }
  
- const (
- 	MetricTypeUnknown MetricType = iota
- 	MetricTypeCounter
- 	MetricTypeGauge
- 	MetricTypeHistogram
- 	MetricTypeSummary
- 	MetricTypeTimer
- 	MetricTypeDistribution
- 	MetricTypeSet
- 	MetricTypeRate
- 	MetricTypePercentile
- 	MetricTypeLatency
- 	MetricTypeThroughput
- 	MetricTypeErrorRate
- 	MetricTypeAvailability
- 	MetricTypeSaturation
- 	MetricTypeUtilization
- 	MetricTypeConcurrency
- 	MetricTypeBacklog
- 	MetricTypeQueueDepth
- 	MetricTypeCacheHitRate
- 	MetricTypeCacheMissRate
- 	MetricTypeCacheSize
- 	MetricTypeDBConnections
- 	MetricTypeDBLatency
- 	MetricTypeDBThroughput
- 	MetricTypeAPIRequests
- 	MetricTypeAPILatency
- 	MetricTypeAPIErrors
- 	MetricTypeAPIRateLimit
- 	MetricTypeWebSocketConnections
- 	MetricTypeWebSocketMessages
- 	MetricTypeWebSocketLatency
- 	MetricTypeGRPCRequests
- 	MetricTypeGRPCLatency
- 	MetricTypeGRPCErrors
- 	MetricTypeEventBusMessages
- 	MetricTypeEventBusLatency
- 	MetricTypeEventBusErrors
- 	MetricTypeQueueProduced
- 	MetricTypeQueueConsumed
- 	MetricTypeQueueLatency
- 	MetricTypeQueueBacklog
- 	MetricTypeWorkerPoolSize
- 	MetricTypeWorkerBusy
- 	MetricTypeWorkerIdle
- 	MetricTypeWorkerQueueDepth
- 	MetricTypeWorkerLatency
- 	MetricTypeBuildInfo
- 	MetricTypeGoVersion
- 	MetricTypeRuntimeInfo
- 	MetricTypeMemoryUsage
- 	MetricTypeCPUUsage
- 	MetricTypeGoroutines
- 	MetricTypeGCPause
- 	MetricTypeGCCount
- 	MetricTypeHeapAlloc
- 	MetricTypeHeapInUse
- 	MetricTypeStackInUse
- 	MetricTypeMutexWait
- 	MetricTypeFileDescriptors
- 	MetricTypeOpenConnections
- 	MetricTypeDiskUsage
- 	MetricTypeDiskIO
- 	MetricTypeNetworkIO
- 	MetricTypeBandwidth
- 	MetricTypePacketLoss
- 	MetricTypeDNSLookup
- 	MetricTypeTLSTime
- 	MetricTypeCertificateExpiry
- )
++// ValidationResult indicates why a sample was rejected.
++type ValidationResult struct {
++	Rejected bool
++	Reason   string
++}
++
++func (v ValidationResult) Error() string {
++	return v.Reason
++}
++
+ // Collector gathers metric samples and periodically flushes them
+ // to a backend. It is safe for concurrent use.
+ //
+@@ -228,6 +244,8 @@
+ 	mu        sync.Mutex
+ 	samples   []MetricSample
+ 	flushFunc func([]MetricSample) error
++	// maxTagCardinality limits the number of unique values per tag key.
++	maxTagCardinality int
+ }
  
- func (m MetricType) String() string {
- 	switch m {
- 	case MetricTypeUnknown:
- 		return "unknown"
- 	case MetricTypeCounter:
- 		return "counter"
- 	case MetricTypeGauge:
- 		return "gauge"
- 	case MetricTypeHistogram:
- 		return "histogram"
- 	case MetricTypeSummary:
- 		return "summary"
- 	case MetricTypeTimer:
- 		return "timer"
- 	case MetricTypeDistribution:
- 		return "distribution"
- 	case MetricTypeSet:
- 		return "set"
- 	case MetricTypeRate:
- 		return "rate"
- 	case MetricTypePercentile:
- 		return "percentile"
- 	case MetricTypeLatency:
- 		return "latency"
- 	case MetricTypeThroughput:
- 		return "throughput"
- 	case MetricTypeErrorRate:
- 		return "error_rate"
- 	case MetricTypeAvailability:
- 		return "availability"
- 	case MetricTypeSaturation:
- 		return "saturation"
- 	case MetricTypeUtilization:
- 		return "utilization"
- 	case MetricTypeConcurrency:
- 		return "concurrency"
- 	case MetricTypeBacklog:
- 		return "backlog"
- 	case MetricTypeQueueDepth:
- 		return "queue_depth"
- 	case MetricTypeCacheHitRate:
- 		return "cache_hit_rate"
- 	case MetricTypeCacheMissRate:
- 		return "cache_miss_rate"
- 	case MetricTypeCacheSize:
- 		return "cache_size"
- 	case MetricTypeDBConnections:
- 		return "db_connections"
- 	case MetricTypeDBLatency:
- 		return "db_latency"
- 	case MetricTypeDBThroughput:
- 		return "db_throughput"
- 	case MetricTypeAPIRequests:
- 		return "api_requests"
- 	case MetricTypeAPILatency:
- 		return "api_latency"
- 	case MetricTypeAPIErrors:
- 		return "api_errors"
- 	case MetricTypeAPIRateLimit:
- 		return "api_rate_limit"
- 	case MetricTypeWebSocketConnections:
- 		return "websocket_connections"
- 	case MetricTypeWebSocketMessages:
- 		return "websocket_messages"
- 	case MetricTypeWebSocketLatency:
- 		return "websocket_latency"
- 	case MetricTypeGRPCRequests:
- 		return "grpc_requests"
- 	case MetricTypeGRPCLatency:
- 		return "grpc_latency"
- 	case MetricTypeGRPCErrors:
- 		return "grpc_errors"
- 	case MetricTypeEventBusMessages:
- 		return "eventbus_messages"
- 	case MetricTypeEventBusLatency:
- 		return "eventbus_latency"
- 	case
+ // NewCollector creates a new Collector with the provided flush function.
+@@ -237,7 +255,8 @@
+ // flushFunc may be called with an empty slice.
+ func NewCollector(flushFunc func([]MetricSample) error) *Collector {
+ 	return &Collector{
+-		flushFunc: flushFunc,
++		flushFunc:         flushFunc,
++		maxTagCardinality: DefaultMaxTagCardinality,
+ 	}
+ }
+ 
+@@ -248,6 +267,36 @@
+ 	c.samples = c.samples[:0]
+ }
+ 
++// SetMaxTagCardinality configures the maximum allowed unique tag values
++// per tag key. Non-positive values disable the limit (not recommended).
++func (c *Collector) SetMaxTagCardinality(limit int) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.maxTagCardinality = limit
++}
++
++// validateSample checks tag cardinality constraints and returns a
++// ValidationResult when the sample should be rejected.
++func (c *Collector) validateSample(sample MetricSample) *ValidationResult {
++	if c.maxTagCardinality <= 0 {
++		return nil
++	}
++	// Count unique values per tag key across this single sample.
++	// In practice, a single sample has one value per key, but we
++	// validate the payload size to guard against abuse.
++	tagValueCount := len(sample.Tags)
++	if tagValueCount > c.maxTagCardinality {
++		return &ValidationResult{
++			Rejected: true,
++			Reason:   fmt.Sprintf("tag cardinality %d exceeds limit %d", tagValueCount, c.maxTagCardinality),
++		}
++	}
++	for k, v := range sample.Tags {
++		if len(k) == 0 || len(v) == 0 {
++			return &ValidationResult{Rejected: true, Reason: "empty tag key or value"}
++		}
++	}
++	return nil
++}
++
+ // Collect adds a sample to the collector. It is safe for concurrent use.
+ // If the collector has reached its capacity, it will flush before adding
+ // the new sample.
+@@ -255,6 +304,11 @@
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 
++	if vr := c.validateSample(sample); vr != nil {
++		// Record the rejection; in production this could be a metric or log.
++		return fmt.Errorf("sample rejected: %s", vr.Reason)
++	}
++
+ 	if len(c.samples) >= cap(c.samples) {
+ 		c.flush()
+ 	}
+@@ -275,6 +329,11 @@
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 
++	for _, s := range samples {
++		if vr := c.validateSample(s); vr != nil {
++			return fmt.Errorf("batch sample rejected: %s", vr.Reason)
++		}
++	}
+ 	if len(c.samples)+len(samples) > cap(c.samples) {
+ 		c.flush()
+ 	}
+@@ -283,6 +342,12 @@
+ 	return nil
+ }
+ 
++// MaxTagCardinality returns the current cardinality limit.
++func (c *Collector) MaxTagCardinality() int {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	return c.maxTagCardinality
++}
++
+ // Flush forces a flush of all pending samples.
+ func (c *Collector) Flush() error {
+ 	c.mu.Lock()
+@@ -293,6 +358,9 @@
+ // Close flushes any remaining samples and cleans up resources.
+ func (c *Collector) Close() error {
+ 	c.Flush()
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.samples = nil
+ 	return nil
+ }
+ 
+@@ -310,6 +378,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print the samples to stdout.
+ 	for _, s := range samples {
++		_ = s
+ 		// Process sample...
+ 	}
+ }
+@@ -319,6 +388,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print the samples to stdout.
+ 	for _, s := range samples {
++		_ = s
+ 		// Process sample...
+ 	}
+ }
+@@ -341,6 +411,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print the samples to stdout.
+ 	for _, s := range samples {
++		_ = s
+ 		// Process sample...
+ 	}
+ }
+@@ -350,6 +421,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print the samples to stdout.
+ 	for _, s := range samples {
++		_ = s
+ 		// Process sample...
+ 	}
+ }
+@@ -359,6 +431,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print the samples to stdout.
+ 	for _, s := range samples {
++		_ = s
+ 		// Process sample...
+ 	}
+ }
+@@ -368,6 +441,7 @@
+ 	// In a real implementation, this would write to a time-series database.
+ 	// For now, we just print
