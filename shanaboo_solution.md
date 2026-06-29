@@ -1,191 +1,165 @@
  ```diff
 --- a/market/analytics/collector.go
 +++ b/market/analytics/collector.go
-@@ -1,4 +1,4 @@
--// Package analytics provides market data collection and reporting.
-+// Package analytics provides market data collection and reporting.// Package analytics provides market data collection and reporting.
+@@ -1,6 +1,7 @@
+ // Package analytics provides market data collection and reporting.
  // WARNING: This package is legacy. Do NOT add new features here. The
  // replacement is in the `analytics-v2` package (which doesn't exist yet).
++// NOTE: Tag cardinality is now limited. See CollectorOpts.MaxTagCardinality.
  //
-@@ -15,6 +15,7 @@
+ // TODO: All metrics collected by this package are off by a factor of 2
+ // when daylight saving time is in effect. This is a known issue. The fix
+@@ -15,6 +16,7 @@ package analytics
+ import (
+ 	"context"
  	"encoding/csv"
++	"errors"
  	"encoding/json"
  	"fmt"
-+	"errors"
  	"math"
- 	"math/rand"
- 	"os"
-@@ -26,6 +27,10 @@
+@@ -29,6 +31,12 @@ import (
  	"time"
  )
  
-+// DefaultMaxTagCardinality is the default maximum number of tags allowed per metric sample.
-+const DefaultMaxTagCardinality = 32
++// ErrExcessiveTagCardinality is returned when a metric sample has more tags
++// than the configured maximum. The sample is rejected to prevent unbounded
++// database growth.
++var ErrExcessiveTagCardinality = errors.New("excessive tag cardinality")
 +
-+// ErrTooManyTags is returned when a metric sample exceeds the configured tag cardinality limit.
-+var ErrTooManyTags = errors.New("metric sample exceeds maximum allowed tag cardinality")
 +
  // MetricType represents the type of metric being collected.
  // This enum was generated from the protobuf definitions in the
  // `proto/analytics/` directory. However, the proto definitions
-@@ -244,6 +249,7 @@
- 	flushInterval time.Duration
- 	outputDir     string
- 	maxBufferSize int
-+	maxTagCardinality int
+@@ -228,6 +236,9 @@ type MetricSample struct {
+ 	// Tags are arbitrary key-value pairs.  WARNING: unbounded tag
+ 	// cardinality has caused the metrics database to grow without
+ 	// limits. There is currently no enforced cap.
++	// 
++	// The collector now enforces a maximum tag cardinality; samples
++	// exceeding the limit are rejected with ErrExcessiveTagCardinality.
+ 	Tags map[string]string `json:"tags"`
  
- 	mu       sync.Mutex
- 	buffer   []MetricSample
-@@ -270,6 +276,7 @@
+ 	// Value is the numeric value of the metric.
+@@ -254,6 +265,10 @@ type CollectorOpts struct {
+ 	// FlushInterval is how often the collector flushes to the backend.
+ 	// Zero means "don't auto-flush".
  	FlushInterval time.Duration
- 	OutputDir     string
- 	MaxBufferSize int
++
++	// MaxTagCardinality is the maximum number of tags allowed per sample.
++	// A safe default is applied if zero or negative.
 +	MaxTagCardinality int
  }
  
- // NewCollector creates a new analytics collector with the provided configuration.
-@@ -286,6 +293,13 @@
- 	if cfg.MaxBufferSize <= 0 {
- 		cfg.MaxBufferSize = 1000
+ // DefaultCollectorOpts returns sensible defaults.
+@@ -262,6 +277,7 @@ func DefaultCollectorOpts() CollectorOpts {
+ 		QueueSize:         1000,
+ 		Workers:           2,
+ 		BackendTimeout:    5 * time.Second,
++		MaxTagCardinality: 32,
  	}
-+	if cfg.MaxTagCardinality <= 0 {
-+		cfg.MaxTagCardinality = DefaultMaxTagCardinality
-+	}
-+	// Ensure maxTagCardinality is at least 1 to avoid division by zero or invalid behavior
-+	if cfg.MaxTagCardinality < 1 {
-+		cfg.MaxTagCardinality = 1
-+	}
- 
- 	c := &Collector{
- 		flushInterval: cfg.FlushInterval,
-@@ -293,6 +307,7 @@
- 		maxBufferSize: cfg.MaxBufferSize,
- 		buffer:        make([]MetricSample, 0, cfg.MaxBufferSize),
- 		done:          make(chan struct{}),
-+		maxTagCardinality: cfg.MaxTagCardinality,
- 	}
- 
- 	go c.loop()
-@@ -301,6 +316,20 @@
- 
- // data collection and reporting.
- 
-+// ValidationResult holds the outcome of validating a metric sample.
-+type ValidationResult struct {
-+	Sample   MetricSample
-+	Accepted bool
-+	Reason   string
-+}
-+
-+// ValidateTagCardinality checks if the metric sample's tag count exceeds the configured limit.
-+func (c *Collector) ValidateTagCardinality(sample MetricSample) ValidationResult {
-+	if len(sample.Tags) > c.maxTagCardinality {
-+		return ValidationResult{Sample: sample, Accepted: false, Reason: fmt.Sprintf("tag count %d exceeds maximum %d", len(sample.Tags), c.maxTagCardinality)}
-+	}
-+	return ValidationResult{Sample: sample, Accepted: true, Reason: ""}
-+}
-+
- // MetricSample represents a single metric data point.
- type MetricSample struct {
- 	Timestamp time.Time         `json:"timestamp"`
-@@ -316,6 +345,7 @@
- 	flushInterval time.Duration
- 	outputDir     string
- 	maxBufferSize int
-+	maxTagCardinality int
- 
- 	mu       sync.Mutex
- 	buffer   []MetricSample
-@@ -342,6 +372,7 @@
- 	FlushInterval time.Duration
- 	OutputDir     string
- 	MaxBufferSize int
-+	MaxTagCardinality int
  }
  
- // NewCollector creates a new analytics collector with the provided configuration.
-@@ -358,6 +389,13 @@
- 	if cfg.MaxBufferSize <= 0 {
- 		cfg.MaxBufferSize = 1000
- 	}
-+	if cfg.MaxTagCardinality <= 0 {
-+		cfg.MaxTagCardinality = DefaultMaxTagCardinality
-+	}
-+	// Ensure maxTagCardinality is at least 1 to avoid division by zero or invalid behavior
-+	if cfg.MaxTagCardinality < 1 {
-+		cfg.MaxTagCardinality = 1
-+	}
+@@ -283,6 +299,10 @@ type Collector struct {
+ 	flushTimer   *time.Timer
+ 	flushTimerMu sync.Mutex
  
- 	c := &Collector{
- 		flushInterval: cfg.FlushInterval,
-@@ -365,6 +403,7 @@
- 		maxBufferSize: cfg.MaxBufferSize,
- 		buffer:        make([]MetricSample, 0, cfg.MaxBufferSize),
- 		done:          make(chan struct{}),
-+		maxTagCardinality: cfg.MaxTagCardinality,
- 	}
- 
- 	go c.loop()
-@@ -373,6 +412,20 @@
- 
- // Collect adds a metric sample to the collector's buffer.
- // If the buffer reaches maxBufferSize, a flush is triggered.
-+// Samples with too many tags are rejected and an error is returned.
-+func (c *Collector) Collect(sample MetricSample) error {
-+	result := c.ValidateTagCardinality(sample)
-+	if !result.Accepted {
-+		c.mu.Lock()
-+		c.droppedCount++
-+		c.mu.Unlock()
-+		return fmt.Errorf("%w: %s", ErrTooManyTags, result.Reason)
-+	}
++	// validationErrors counts rejected samples by reason.
++	validationErrors map[string]int64
++	validationMu   sync.Mutex
 +
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+
-+	c.buffer = append(c.buffer, sample)
-+	if len(c.buffer) >= c.maxBufferSize {
-+		c.flush()
+ 	// backend is the HTTP endpoint or file path where metrics go.
+ 	backend string
+ 
+@@ -311,6 +331,7 @@ func NewCollector(opts CollectorOpts, backend string) *Collector {
+ 		opts:     opts,
+ 		samples:  make([]MetricSample, 0, opts.QueueSize),
+ 		backend:  backend,
++		validationErrors: make(map[string]int64),
+ 	}
+ }
+ 
+@@ -319,6 +340,12 @@ func (c *Collector) Start(ctx context.Context) error {
+ 	if c.opts.Workers <= 0 {
+ 		c.opts.Workers = 1
+ 	}
++	if c.opts.MaxTagCardinality <= 0 {
++		c.opts.MaxTagCardinality = DefaultCollectorOpts().MaxTagCardinality
++	}
++	if c.opts.QueueSize <= 0 {
++		c.opts.QueueSize = DefaultCollectorOpts().QueueSize
++	}
+ 
+ 	c.wg.Add(c.opts.Workers)
+ 	for i := 0; i < c.opts.Workers; i++ {
+@@ -343,6 +370,24 @@ func (c *Collector) Start(ctx context.Context) error {
+ 	return nil
+ }
+ 
++// validateSample checks whether the sample conforms to configured limits.
++// It returns a non-nil error if the sample should be rejected.
++func (c *Collector) validateSample(sample *MetricSample) error {
++	if sample == nil {
++		return errors.New("nil sample")
++	}
++	if len(sample.Tags) > c.opts.MaxTagCardinality {
++		return fmt.Errorf("%w: %d tags exceeds limit of %d", ErrExcessiveTagCardinality, len(sample.Tags), c.opts.MaxTagCardinality)
 +	}
 +	return nil
++
 +}
 +
-+// DroppedCount returns the number of samples dropped due to validation
-+// (e.g., excessive tag cardinality).
-+func (c *Collector) DroppedCount() int {
-+	c.mu.Lock()
-+	defer c.mu.Unlock()
-+	return c.droppedCount
++func (c *Collector) recordValidationError(reason string) {
++	c.validationMu.Lock()
++	defer c.validationMu.Unlock()
++	c.validationErrors[reason]++
 +}
 +
-+// loop is the background goroutine that periodically flushes the buffer.
- func (c *Collector) loop() {
- 	ticker := time.NewTicker(c.flushInterval)
- 	defer ticker.Stop()
-@@ -388,6 +441,7 @@
+ // Collect ingests a single metric sample.  It is safe for concurrent use.
+ func (c *Collector) Collect(sample MetricSample) error {
+ 	c.mu.Lock()
+@@ -351,6 +396,14 @@ func (c *Collector) Collect(sample MetricSample) error {
+ 	if c.closed {
+ 		return fmt.Errorf("collector is closed")
  	}
++
++	if err := c.validateSample(&sample); err != nil {
++		if errors.Is(err, ErrExcessiveTagCardinality) {
++			c.recordValidationError("excessive_tag_cardinality")
++		}
++		return err
++	}
++
+ 	if len(c.samples) >= c.opts.QueueSize {
+ 		// Drop oldest to make room (circular buffer behavior).
+ 		c.samples = c.samples[1:]
+@@ -360,6 +413,20 @@ func (c *Collector) Collect(sample MetricSample) error {
+ 	return nil
  }
  
-+// flush writes the current buffer to disk and clears it.
- func (c *Collector) flush() {
- 	if len(c.buffer) == 0 {
- 		return
-@@ -395,6 +449,7 @@
- 
- 	// Write to CSV
- 	timestamp := time.Now().Unix()
-+	//nolint:errcheck // best effort logging
- 	filename := filepath.Join(c.outputDir, fmt.Sprintf("metrics_%d.csv", timestamp))
- 
- 	file, err := os.Create(filename)
-@@ -424,6 +479,7 @@
- 	c.buffer = c.buffer[:0]
- }
- 
-+// Stop halts the collector and flushes any remaining samples.
- func (c *Collector) Stop() {
- 	close(c.done)
- 	c.flush()
-@@ -431,6 +487,7 @@
- 
- // MetricRecord is
++// ValidationErrors returns a snapshot of validation error counters.
++func (c *Collector) ValidationErrors() map[string]int64 {
++	c.validationMu.Lock()
++	defer c.validationMu.Unlock()
++	out := make(map[string]int64, len(c.validationErrors))
++	for k, v := range c.validationErrors {
++		out[k] = v
++	}
++	return out
++}
++
+ // Flush forces a write of all queued samples to the backend.
+ func (c *Collector) Flush() error {
+ 	c.mu.Lock()
+@@ -556,6 +623,7 @@ func (c *Collector) worker() {
+ // Report generates a human-readable summary of collected metrics.
+ func (c *Collector) Report() string {
+ 	c.mu.Lock()
++	c.validationMu.Lock()
+ 	var buf strings.Builder
+ 	buf.WriteString("=== Analytics Collector Report ===\n")
+ 	buf.WriteString(fmt.Sprintf("Backend: %s\n", c.backend))
+@@ -563,8 +631,15 @@ func (c *Collector) Report() string {
+ 	buf.WriteString(fmt.Sprintf("Workers: %d\n", c.opts.Workers))
+ 	buf.WriteString(fmt.Sprintf("QueueSize: %d\n", c.opts.QueueSize))
+ 	buf.WriteString(fmt.Sprintf("FlushInterval: %v\n", c.opts.FlushInterval))
++	buf.Write
